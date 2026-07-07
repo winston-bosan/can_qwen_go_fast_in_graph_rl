@@ -305,7 +305,7 @@ def main(argv: list[str] | None = None) -> int:
     use_llm = verbalize.have_api_key()
     if not use_llm:
         print(
-            "WARNING: ANTHROPIC_API_KEY not set — questions will use the "
+            "WARNING: OPENROUTER_API_KEY not set — questions will use the "
             "deterministic scaffold text."
         )
 

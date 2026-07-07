@@ -11,7 +11,19 @@ the intended pattern semantics (accept/reject + reason). We accept a
 question only when (a) the judge says the mapping is unique and (b) the
 reconstructed relation multiset equals the template's.
 
-Uses the anthropic SDK (model: claude-sonnet-5, env ANTHROPIC_API_KEY).
+LLM access (DESIGN.md, amended): OpenAI SDK against OpenRouter —
+base_url = config.OPENROUTER_BASE_URL, api_key = $OPENROUTER_API_KEY
+(auto-loaded from the repo-root .env by ecs.config), model =
+config.QGEN_MODEL (default "deepseek/deepseek-v4-pro"). The anthropic SDK
+path is retired for generation.
+
+Robustness/observability:
+  * `_chat` retries with exponential backoff + jitter on 429/5xx/connection
+    errors (OpenRouter rate limits);
+  * every response's token usage (and OpenRouter's reported cost, requested
+    via `usage: {include: true}`) is accumulated in the module-level `USAGE`
+    tracker and logged, so cost per accepted question is measurable.
+
 The module imports cleanly without the key; API-touching helpers raise
 `ApiKeyMissing` with a clear message, and tests skip.
 """
@@ -19,12 +31,19 @@ The module imports cleanly without the key; API-touching helpers raise
 from __future__ import annotations
 
 import json
+import logging
 import os
+import random
 import re
+import time
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
-VERBALIZER_MODEL = os.environ.get("ECS_VERBALIZER_MODEL", "claude-sonnet-5")
+from ecs import config  # side effect: loads repo-root .env (OPENROUTER_API_KEY)
+
+log = logging.getLogger(__name__)
+
+QGEN_MODEL = config.QGEN_MODEL
 
 STYLE_VARIANTS: dict[str, str] = {
     "direct": "a plain, direct factual question ('Which films ... ?')",
@@ -50,26 +69,121 @@ Paraphrase-diversity rules:
 
 
 class ApiKeyMissing(RuntimeError):
-    """Raised when ANTHROPIC_API_KEY is not set; message explains the skip."""
+    """Raised when OPENROUTER_API_KEY is not set; message explains the skip."""
 
 
 def have_api_key() -> bool:
-    return bool(os.environ.get("ANTHROPIC_API_KEY"))
+    return bool(os.environ.get("OPENROUTER_API_KEY"))
 
 
 def _client():
     if not have_api_key():
         raise ApiKeyMissing(
-            "ANTHROPIC_API_KEY is not set — skipping LLM verbalization / "
-            "round-trip check (export the key to enable them)."
+            "OPENROUTER_API_KEY is not set (repo-root .env or environment) — "
+            "skipping LLM verbalization / round-trip check."
         )
-    import anthropic  # lazy: module must import without the SDK configured
+    from openai import OpenAI  # lazy: module must import without the SDK configured
 
-    return anthropic.Anthropic()
+    return OpenAI(
+        base_url=config.OPENROUTER_BASE_URL,
+        api_key=os.environ["OPENROUTER_API_KEY"],
+    )
 
 
-def _text_of(response) -> str:
-    return "".join(b.text for b in response.content if b.type == "text")
+# ---------------------------------------------------------------------------
+# Usage tracking + retrying chat call
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class UsageTracker:
+    """Accumulates token usage / cost across calls (module-level: `USAGE`)."""
+
+    calls: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    cost_usd: float = 0.0
+    _t0: float = field(default_factory=time.time)
+
+    def add(self, usage) -> None:
+        self.calls += 1
+        if usage is None:
+            return
+        self.prompt_tokens += getattr(usage, "prompt_tokens", 0) or 0
+        self.completion_tokens += getattr(usage, "completion_tokens", 0) or 0
+        # OpenRouter reports credit cost on usage.cost when requested
+        self.cost_usd += getattr(usage, "cost", 0.0) or 0.0
+
+    def reset(self) -> None:
+        self.calls = 0
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
+        self.cost_usd = 0.0
+        self._t0 = time.time()
+
+    def summary(self) -> str:
+        return (
+            f"{self.calls} LLM calls, {self.prompt_tokens} prompt + "
+            f"{self.completion_tokens} completion tokens, "
+            f"${self.cost_usd:.4f}, {time.time() - self._t0:.0f}s elapsed"
+        )
+
+
+USAGE = UsageTracker()
+
+RETRYABLE_STATUS = {429, 500, 502, 503, 504, 520, 522, 524}
+
+
+def _status_of(exc: Exception) -> int | None:
+    return getattr(exc, "status_code", None)
+
+
+def _is_retryable(exc: Exception) -> bool:
+    status = _status_of(exc)
+    if status is not None:
+        return status in RETRYABLE_STATUS or status >= 500
+    # connection/timeout errors carry no status; retry them too
+    return type(exc).__name__ in {"APIConnectionError", "APITimeoutError"}
+
+
+def _chat(
+    prompt: str,
+    client=None,
+    model: str = QGEN_MODEL,
+    max_tokens: int = 1024,
+    max_retries: int = 4,
+    base_delay: float = 2.0,
+) -> str:
+    """One chat completion with backoff on 429/5xx; tracks usage; returns text."""
+    client = client or _client()
+    for attempt in range(max_retries + 1):
+        try:
+            resp = client.chat.completions.create(
+                model=model,
+                max_tokens=max_tokens,
+                messages=[{"role": "user", "content": prompt}],
+                extra_body={"usage": {"include": True}},  # OpenRouter: report cost
+            )
+            usage = getattr(resp, "usage", None)
+            USAGE.add(usage)
+            log.info(
+                "qgen call model=%s prompt_tokens=%s completion_tokens=%s cost=%s",
+                model,
+                getattr(usage, "prompt_tokens", None),
+                getattr(usage, "completion_tokens", None),
+                getattr(usage, "cost", None),
+            )
+            return resp.choices[0].message.content or ""
+        except Exception as exc:  # openai typed errors; SDK import stays lazy
+            if not _is_retryable(exc) or attempt == max_retries:
+                raise
+            delay = base_delay * (2**attempt) + random.uniform(0, 1)
+            log.warning(
+                "retryable LLM error (%s, status=%s); retry %d/%d in %.1fs",
+                type(exc).__name__, _status_of(exc), attempt + 1, max_retries, delay,
+            )
+            time.sleep(delay)
+    raise RuntimeError("unreachable")  # loop either returns or raises
 
 
 # ---------------------------------------------------------------------------
@@ -108,19 +222,14 @@ def verbalize(
     relations: list[str],
     style: str = "direct",
     client=None,
-    model: str = VERBALIZER_MODEL,
+    model: str = QGEN_MODEL,
 ) -> str:
     """Prompt A: verbalize a pattern; returns the question text."""
-    client = client or _client()
     prompt = build_verbalize_prompt(semantics, relations, style)
-    resp = client.messages.create(
-        model=model,
-        max_tokens=1024,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    q = parse_question(_text_of(resp))
+    text = _chat(prompt, client=client, model=model)
+    q = parse_question(text)
     if not q:
-        raise ValueError(f"verbalizer returned no <question> block: {_text_of(resp)!r}")
+        raise ValueError(f"verbalizer returned no <question> block: {text!r}")
     return q
 
 
@@ -195,19 +304,14 @@ def roundtrip_check(
     relations_available: list[str],
     expected_pids: list[str],
     client=None,
-    model: str = VERBALIZER_MODEL,
+    model: str = QGEN_MODEL,
 ) -> JudgeResult:
     """Prompt B: judge whether `question` uniquely maps back to the pattern.
 
     `relations_available` are human-readable entries like 'P69 (educated at)'
     — the judge sees only the question and this vocabulary, never the pattern.
     """
-    client = client or _client()
     prompt = build_judge_prompt(question, relations_available)
-    resp = client.messages.create(
-        model=model,
-        max_tokens=1024,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    parsed = parse_judge_response(_text_of(resp))
+    text = _chat(prompt, client=client, model=model)
+    parsed = parse_judge_response(text)
     return judge_verdict(parsed, expected_pids)

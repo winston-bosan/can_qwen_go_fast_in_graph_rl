@@ -4,11 +4,15 @@ Pipeline per question: sample_pattern -> execute (exact golden sets, filters)
 -> LLM verbalize (Prompt A) -> round-trip faithfulness check (Prompt B)
 -> append JSONL.
 
+LLM: config.QGEN_MODEL via OpenRouter (OPENROUTER_API_KEY, auto-loaded from
+the repo-root .env by ecs.config). Prints a token-usage/cost summary at the
+end so cost per accepted question is measurable.
+
 Degrades gracefully:
   * neo4j down          -> clear skip message, exit 0
-  * ANTHROPIC_API_KEY unset -> falls back to the deterministic semantics
-    scaffold as the question text and skips the round-trip check (records are
-    tagged via --require-llm to forbid this in production runs)
+  * OPENROUTER_API_KEY unset -> falls back to the deterministic semantics
+    scaffold as the question text and skips the round-trip check (use
+    --require-llm to forbid this in production runs)
 
 Usage:
   .venv/bin/python -m questiongen.generate --n 20
@@ -97,9 +101,12 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     use_llm = verbalize.have_api_key()
-    if not use_llm:
+    client = None
+    if use_llm:
+        client = verbalize._client()  # one client for the whole run
+    else:
         msg = (
-            "ANTHROPIC_API_KEY not set — questions will use the deterministic "
+            "OPENROUTER_API_KEY not set — questions will use the deterministic "
             "semantics scaffold and skip the round-trip check."
         )
         if args.require_llm:
@@ -115,7 +122,7 @@ def main(argv: list[str] | None = None) -> int:
         attempts += 1
         try:
             record, status = generate_one(
-                rng, args.seed_qid, args.template, args.style, use_llm
+                rng, args.seed_qid, args.template, args.style, use_llm, client=client
             )
         except kg_patterns.Neo4jUnavailable as exc:
             print(f"SKIP: {exc}")
@@ -123,6 +130,15 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[{attempts}] {status}")
         if record is not None:
             records.append(record)
+
+    if use_llm and verbalize.USAGE.calls:
+        u = verbalize.USAGE
+        print(f"LLM usage ({verbalize.QGEN_MODEL}): {u.summary()}")
+        if records:
+            print(
+                f"accepted {len(records)}/{attempts} attempts "
+                f"(${u.cost_usd / len(records):.4f} per accepted question)"
+            )
 
     if not records:
         print(f"no questions produced after {attempts} attempts")

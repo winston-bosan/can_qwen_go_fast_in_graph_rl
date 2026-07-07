@@ -169,7 +169,13 @@ def summarize(report: dict) -> str:
     )
 
 
-def build_policy(name: str, records: list[QuestionRecord], k: int, seed: int) -> Policy | None:
+def build_policy(
+    name: str,
+    records: list[QuestionRecord],
+    k: int,
+    seed: int,
+    model: str | None = None,
+) -> Policy | None:
     """Returns None (after printing a skip message) when a policy's service is down."""
     if name == "random":
         return RandomBaseline.from_records(records, k=k, seed=seed)
@@ -182,10 +188,16 @@ def build_policy(name: str, records: list[QuestionRecord], k: int, seed: int) ->
             )
             return None
         return policy
-    if name == "claude":
-        from .claude_baseline import ClaudeBaseline  # lazy: needs anthropic + toolserver
+    if name in ("agent", "claude"):  # "claude" = deprecated alias
+        from .agent_baseline import DEFAULT_MODEL, FRONTIER_MODEL, AgentBaseline
 
-        policy = ClaudeBaseline(k=k)
+        if name == "claude":
+            print(
+                "NOTE: --policy claude is deprecated; use "
+                f"--policy agent --model {FRONTIER_MODEL}"
+            )
+        chosen = model or (FRONTIER_MODEL if name == "claude" else DEFAULT_MODEL)
+        policy = AgentBaseline(k=k, model=chosen)
         reason = policy.unavailable_reason()
         if reason:
             print(f"SKIP: {reason}")
@@ -197,7 +209,14 @@ def build_policy(name: str, records: list[QuestionRecord], k: int, seed: int) ->
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--questions", required=True, help="questions JSONL path")
-    ap.add_argument("--policy", default="random", choices=["random", "vector", "claude"])
+    ap.add_argument(
+        "--policy", default="random", choices=["random", "vector", "agent", "claude"]
+    )
+    ap.add_argument(
+        "--model", default=None,
+        help="OpenRouter model id for --policy agent "
+        "(e.g. anthropic/claude-sonnet-5, deepseek/deepseek-v4-pro)",
+    )
     ap.add_argument("--k", type=int, default=DEFAULT_K)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--limit", type=int, default=None)
@@ -214,12 +233,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"SKIP: no records in {args.questions}")
         return 0
 
-    policy = build_policy(args.policy, records, args.k, args.seed)
+    policy = build_policy(args.policy, records, args.k, args.seed, model=args.model)
     if policy is None:
         return 0
 
     report = evaluate(records, policy, k=args.k)
-    out = args.out or os.path.join(config.DATA_DIR, "reports", f"{policy.name}.json")
+    safe_name = policy.name.replace("/", "_").replace(":", "_")
+    out = args.out or os.path.join(config.DATA_DIR, "reports", f"{safe_name}.json")
     write_report(report, out)
     print(summarize(report))
     print(f"report -> {out}")
