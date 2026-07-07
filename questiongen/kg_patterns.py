@@ -64,9 +64,25 @@ class PatternTemplate:
     hops: int  # number of graph edges == difficulty
     relations: tuple[str, ...]  # P-ids traversed (with multiplicity)
     anchors: tuple[str, ...]  # anchor slot names, e.g. ("school",)
+    roles: tuple[str, ...]  # required entity type per anchor slot (type gate)
     sampler_cypher: str  # one row: qid_<anchor>, title_<anchor> per anchor
     exec_cypher: str  # params $qid_<anchor>; RETURN answers, bridges
     semantics: str  # NL scaffold; "{<anchor>}" placeholders take titles
+
+
+# Reusable role descriptions for the anchor-type gate (calibration found P69
+# edges landing on yearbooks / athletics programs / alumni societies).
+ROLE_SCHOOL = (
+    "an educational institution (a school, college, or university — NOT a "
+    "yearbook, athletics program, alumni society, or other school-adjacent "
+    "entity)"
+)
+ROLE_FILM = "a film (NOT a novel, comment page, or other non-film work)"
+ROLE_PERSON = "a person"
+ROLE_ORG_MEMBER = "an organization that people can be members of"
+ROLE_OWNER = "an organization or person that can own companies"
+ROLE_OCCUPATION = "an occupation or profession"
+ROLE_COUNTRY = "a country"
 
 
 @dataclass(frozen=True)
@@ -115,6 +131,7 @@ PATTERNS: list[PatternTemplate] = [
         hops=2,
         relations=("P57", "P69"),
         anchors=("school",),
+        roles=(ROLE_SCHOOL,),
         sampler_cypher=f"""
 MATCH (film:Entity)-[:P57]->(d:Entity)-[:P69]->(school:Entity)
 WHERE $seed IS NULL OR school.qid = $seed
@@ -137,6 +154,7 @@ RETURN collect(DISTINCT film.qid) AS answers, collect(DISTINCT d.qid) AS bridges
         hops=2,
         relations=("P50", "P463"),
         anchors=("org",),
+        roles=(ROLE_ORG_MEMBER,),
         sampler_cypher=f"""
 MATCH (w:Entity)-[:P50]->(a:Entity)-[:P463]->(org:Entity)
 WHERE $seed IS NULL OR org.qid = $seed
@@ -159,6 +177,7 @@ RETURN collect(DISTINCT w.qid) AS answers, collect(DISTINCT a.qid) AS bridges
         hops=2,
         relations=("P108", "P112"),
         anchors=("founder",),
+        roles=(ROLE_PERSON,),
         sampler_cypher=f"""
 MATCH (p:Entity)-[:P108]->(c:Entity)-[:P112]->(founder:Entity)
 WHERE $seed IS NULL OR founder.qid = $seed
@@ -181,6 +200,7 @@ RETURN collect(DISTINCT p.qid) AS answers, collect(DISTINCT c.qid) AS bridges
         hops=2,
         relations=("P69", "P106"),
         anchors=("school", "occ"),
+        roles=(ROLE_SCHOOL, ROLE_OCCUPATION),
         sampler_cypher=f"""
 MATCH (occ:Entity)<-[:P106]-(p:Entity)-[:P69]->(school:Entity)
 WHERE $seed IS NULL OR school.qid = $seed
@@ -204,6 +224,7 @@ RETURN collect(DISTINCT p.qid) AS answers, [] AS bridges
         hops=2,
         relations=("P161", "P161"),
         anchors=("film_a", "film_b"),
+        roles=(ROLE_FILM, ROLE_FILM),
         sampler_cypher=f"""
 MATCH (film_a:Entity)-[:P161]->(x:Entity)<-[:P161]-(film_b:Entity)
 WHERE film_a.qid < film_b.qid AND ($seed IS NULL OR film_a.qid = $seed)
@@ -227,6 +248,7 @@ RETURN collect(DISTINCT x.qid) AS answers, [] AS bridges
         hops=2,
         relations=("P57", "P161"),
         anchors=("director", "actor"),
+        roles=(ROLE_PERSON, ROLE_PERSON),
         sampler_cypher=f"""
 MATCH (director:Entity)<-[:P57]-(film:Entity)-[:P161]->(actor:Entity)
 WHERE director.qid <> actor.qid AND ($seed IS NULL OR director.qid = $seed)
@@ -251,6 +273,7 @@ RETURN collect(DISTINCT film.qid) AS answers, [] AS bridges
         hops=3,
         relations=("P112", "P69", "P127"),
         anchors=("school", "owner"),
+        roles=(ROLE_SCHOOL, ROLE_OWNER),
         sampler_cypher=f"""
 MATCH (school:Entity)<-[:P69]-(x:Entity)<-[:P112]-(y:Entity)-[:P127]->(owner:Entity)
 WHERE $seed IS NULL OR school.qid = $seed
@@ -274,6 +297,7 @@ RETURN collect(DISTINCT y.qid) AS answers, collect(DISTINCT x.qid) AS bridges
         hops=3,
         relations=("P108", "P112", "P69"),
         anchors=("school",),
+        roles=(ROLE_SCHOOL,),
         sampler_cypher=f"""
 MATCH (p:Entity)-[:P108]->(c:Entity)-[:P112]->(f:Entity)-[:P69]->(school:Entity)
 WHERE $seed IS NULL OR school.qid = $seed
@@ -297,6 +321,7 @@ RETURN collect(DISTINCT p.qid) AS answers,
         hops=3,
         relations=("P463", "P69", "P17"),
         anchors=("org", "country"),
+        roles=(ROLE_ORG_MEMBER, ROLE_COUNTRY),
         sampler_cypher=f"""
 MATCH (org:Entity)<-[:P463]-(p:Entity)-[:P69]->(s:Entity)-[:P17]->(country:Entity)
 WHERE $seed IS NULL OR org.qid = $seed
@@ -321,6 +346,7 @@ RETURN collect(DISTINCT p.qid) AS answers, collect(DISTINCT s.qid) AS bridges
         hops=4,
         relations=("P57", "P69", "P69", "P57"),
         anchors=("film",),
+        roles=(ROLE_FILM,),
         sampler_cypher=f"""
 MATCH (f1:Entity)-[:P57]->(d1:Entity)-[:P69]->(s:Entity)<-[:P69]-(d2:Entity)<-[:P57]-(film:Entity)
 WHERE d1 <> d2 AND f1 <> film AND ($seed IS NULL OR film.qid = $seed)
@@ -346,6 +372,7 @@ RETURN collect(DISTINCT f1.qid) AS answers,
         hops=4,
         relations=("P108", "P127", "P112", "P69"),
         anchors=("school",),
+        roles=(ROLE_SCHOOL,),
         sampler_cypher=f"""
 MATCH (p:Entity)-[:P108]->(c:Entity)-[:P127]->(parent:Entity)-[:P112]->(f:Entity)-[:P69]->(school:Entity)
 WHERE $seed IS NULL OR school.qid = $seed
@@ -402,6 +429,25 @@ def anchors_from_row(template: PatternTemplate, row: dict) -> dict[str, dict[str
             )
         anchors[slot] = {"qid": qid, "title": row.get(f"title_{slot}") or qid}
     return anchors
+
+
+def title_ok(title: str | None, qid: str) -> bool:
+    """Title-hygiene pre-filter (free, before any LLM call).
+
+    Rejects anchors whose title is empty, equals the QID (alias-less
+    entities), or contains '/' or '#' (subpage/fragment artifacts like
+    'Sudden Death (Stephen Mertz novel)/Comments').
+    """
+    if not title or not title.strip():
+        return False
+    if title.strip() == qid:
+        return False
+    return not any(ch in title for ch in "/#")
+
+
+def anchors_ok(pattern: InstantiatedPattern) -> bool:
+    """True when every anchor of the pattern passes title hygiene."""
+    return all(title_ok(a.get("title"), a["qid"]) for a in pattern.anchors.values())
 
 
 def filter_answers(

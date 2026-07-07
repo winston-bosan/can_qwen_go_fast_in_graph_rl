@@ -218,3 +218,44 @@ def test_run_cypher_unreachable_raises_clear_message(monkeypatch):
     assert kp.neo4j_available() is False
     with pytest.raises(kp.Neo4jUnavailable, match="skipping KG-pattern"):
         kp.run_cypher("RETURN 1", {})
+
+
+# ---------------------------------------------------------------------------
+# Anchor roles + title hygiene (full-run guards)
+# ---------------------------------------------------------------------------
+
+
+def test_templates_declare_roles_for_every_anchor():
+    for t in kp.PATTERNS:
+        assert len(t.roles) == len(t.anchors), t.name
+        assert all(r for r in t.roles), t.name
+    # every school slot uses the school role (with the yearbook exclusion)
+    for t in kp.PATTERNS:
+        for slot, role in zip(t.anchors, t.roles):
+            if slot == "school":
+                assert role is kp.ROLE_SCHOOL, t.name
+    assert "yearbook" in kp.ROLE_SCHOOL  # the calibration failure classes
+    assert "athletics" in kp.ROLE_SCHOOL
+    assert "alumni" in kp.ROLE_SCHOOL
+    assert "novel" in kp.ROLE_FILM
+
+
+def test_title_ok_hygiene():
+    assert kp.title_ok("MIT", "Q49108")
+    assert not kp.title_ok("Sudden Death (Stephen Mertz novel)/Comments", "Q1")
+    assert not kp.title_ok("Something#Fragment", "Q1")
+    assert not kp.title_ok("", "Q1")
+    assert not kp.title_ok(None, "Q1")
+    assert not kp.title_ok("   ", "Q1")
+    assert not kp.title_ok("Q1", "Q1")  # alias-less entity (title == QID)
+
+
+def test_anchors_ok():
+    good = kp.InstantiatedPattern(
+        template=T, anchors={"school": {"qid": "Q1", "title": "MIT"}}
+    )
+    bad = kp.InstantiatedPattern(
+        template=T, anchors={"school": {"qid": "Q1", "title": "Page/Comments"}}
+    )
+    assert kp.anchors_ok(good)
+    assert not kp.anchors_ok(bad)

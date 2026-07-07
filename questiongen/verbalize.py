@@ -67,17 +67,35 @@ DIVERSITY_RULES = """\
 Paraphrase-diversity rules:
 - Do NOT copy the relation names verbatim; use natural synonyms
   (e.g. "educated at" -> "studied at", "attended"; "cast member" -> "starred in").
+- EXCEPTION for "educated at" (P69): NEVER render it as "graduate of",
+  "graduated from", or any phrasing that implies graduation — the relation
+  only records attendance. Use "attended", "studied at", or "was educated at".
 - Vary sentence structure; do not start with "Which entity".
 - Refer to anchor entities by their titles copied VERBATIM — preserve
   capitalization, punctuation, and spacing exactly as given; never invent
   extra qualifiers (dates, nationalities) that are not in the pattern.
+- NEVER add type qualifiers that the pattern does not state (e.g. do not
+  narrow "institution" to "degree-granting institution" or "university").
 - Never mention Wikidata, QIDs, Cypher, graphs, or the word "entity".
 - The question must ask for ALL qualifying items, not one example.
 - Do not reveal or enumerate any answers."""
 
+ANCHOR_GATE_RULES = """\
+Anchor-type gate: before writing anything, check each anchor's abstract
+snippet against its required role above. If ANY anchor is not actually what
+its role requires (e.g. the school slot holds a yearbook, an athletics
+program, or an alumni society instead of an educational institution; or the
+film slot holds a novel), do NOT write a question — reply with exactly
+<reject>anchor "TITLE" is DESCRIPTION-OF-WHAT-IT-ACTUALLY-IS, not ROLE</reject>
+and nothing else."""
+
 
 class ApiKeyMissing(RuntimeError):
     """Raised when OPENROUTER_API_KEY is not set; message explains the skip."""
+
+
+class AnchorRejected(RuntimeError):
+    """The verbalizer's anchor-type gate fired; str(exc) is the reason."""
 
 
 def have_api_key() -> bool:
@@ -168,7 +186,7 @@ def _chat(
     prompt: str,
     client=None,
     model: str = QGEN_MODEL,
-    max_tokens: int = 1024,
+    max_tokens: int = 2048,  # reasoning models can burn completion tokens; 1024 truncated
     max_retries: int = 4,
     base_delay: float = 2.0,
 ) -> str:
@@ -209,16 +227,32 @@ def _chat(
 # ---------------------------------------------------------------------------
 
 
-def build_verbalize_prompt(semantics: str, relations: list[str], style: str) -> str:
+def build_verbalize_prompt(
+    semantics: str,
+    relations: list[str],
+    style: str,
+    anchors_info: list[str] | None = None,
+) -> str:
+    """Prompt A. `anchors_info` lines (title — required role — abstract
+    snippet) arm the anchor-type gate; without them the gate is off."""
     if style not in STYLE_VARIANTS:
         raise ValueError(f"unknown style {style!r}; one of {sorted(STYLE_VARIANTS)}")
+    gate = ""
+    if anchors_info:
+        info = "\n".join(f"- {line}" for line in anchors_info)
+        gate = f"""
+Anchor entities (title — required role in the pattern — abstract snippet):
+{info}
+
+{ANCHOR_GATE_RULES}
+"""
     return f"""You write benchmark questions over a knowledge graph of Wikipedia entities.
 
 Underlying pattern (the exact semantics your question must preserve):
 {semantics}
 
 Relations traversed by the pattern: {", ".join(relations)}
-
+{gate}
 Write ONE natural-language question with exactly these semantics, phrased as
 {STYLE_VARIANTS[style]}.
 
@@ -235,16 +269,32 @@ def parse_question(text: str) -> str | None:
     return q or None
 
 
+def parse_reject(text: str) -> str | None:
+    """The anchor-type gate's sentinel, or None."""
+    m = re.search(r"<reject>(.*?)</reject>", text, re.DOTALL)
+    if not m:
+        return None
+    return " ".join(m.group(1).split()) or "anchor rejected (no reason given)"
+
+
 def verbalize(
     semantics: str,
     relations: list[str],
     style: str = "direct",
     client=None,
     model: str = QGEN_MODEL,
+    anchors_info: list[str] | None = None,
 ) -> str:
-    """Prompt A: verbalize a pattern; returns the question text."""
-    prompt = build_verbalize_prompt(semantics, relations, style)
+    """Prompt A: verbalize a pattern; returns the question text.
+
+    Raises AnchorRejected when the anchor-type gate fires (an anchor's
+    abstract shows it doesn't fit its role in the pattern).
+    """
+    prompt = build_verbalize_prompt(semantics, relations, style, anchors_info)
     text = _chat(prompt, client=client, model=model)
+    reject = parse_reject(text)
+    if reject is not None:
+        raise AnchorRejected(reject)
     q = parse_question(text)
     if not q:
         raise ValueError(f"verbalizer returned no <question> block: {text!r}")

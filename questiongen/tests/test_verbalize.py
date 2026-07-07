@@ -249,3 +249,55 @@ def test_live_verbalize_and_roundtrip():
     # usage was tracked for both calls
     assert vb.USAGE.calls == 2
     assert vb.USAGE.prompt_tokens > 0 and vb.USAGE.completion_tokens > 0
+
+
+# ---------------------------------------------------------------------------
+# Anchor-type gate + verbalizer constraints (full-run guards)
+# ---------------------------------------------------------------------------
+
+ANCHORS_INFO = [
+    '"Yale Banner" — must be an educational institution (...) — abstract: "The Yale Banner is the yearbook of Yale University..."',
+]
+
+
+def test_diversity_rules_p69_and_qualifier_constraints():
+    assert "graduate of" in vb.DIVERSITY_RULES
+    assert "graduated from" in vb.DIVERSITY_RULES
+    assert "attended" in vb.DIVERSITY_RULES
+    assert "NEVER add type qualifiers" in vb.DIVERSITY_RULES
+
+
+def test_prompt_without_anchors_info_has_no_gate():
+    p = vb.build_verbalize_prompt(SEMANTICS, RELATIONS, "direct")
+    assert "<reject>" not in p and "Anchor-type gate" not in p
+
+
+def test_prompt_with_anchors_info_arms_the_gate():
+    p = vb.build_verbalize_prompt(SEMANTICS, RELATIONS, "direct", ANCHORS_INFO)
+    assert ANCHORS_INFO[0] in p
+    assert "Anchor-type gate" in p
+    assert "<reject>" in p
+    assert "yearbook" in p  # failure classes spelled out for the model
+
+
+def test_parse_reject():
+    assert (
+        vb.parse_reject('<reject>anchor "Yale Banner" is a yearbook, not a school</reject>')
+        == 'anchor "Yale Banner" is a yearbook, not a school'
+    )
+    assert vb.parse_reject("<question>ok?</question>") is None
+    assert vb.parse_reject("<reject>  </reject>") == "anchor rejected (no reason given)"
+
+
+def test_verbalize_raises_anchor_rejected_on_sentinel():
+    stub = StubClient([make_response("<reject>anchor is a yearbook</reject>")])
+    with pytest.raises(vb.AnchorRejected, match="yearbook"):
+        vb.verbalize(SEMANTICS, RELATIONS, client=stub, anchors_info=ANCHORS_INFO)
+
+
+def test_verbalize_passes_anchors_info_through():
+    stub = StubClient([make_response("<question>Which films qualify?</question>")])
+    q = vb.verbalize(SEMANTICS, RELATIONS, client=stub, anchors_info=ANCHORS_INFO)
+    assert q == "Which films qualify?"
+    sent_prompt = stub.last_kwargs["messages"][0]["content"]
+    assert ANCHORS_INFO[0] in sent_prompt
