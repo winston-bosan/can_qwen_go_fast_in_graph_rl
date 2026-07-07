@@ -325,3 +325,88 @@ def test_judge_model_env_override(monkeypatch):
         importlib.reload(vb)
     # default: self-judge (generator model) until calibration verdict lands
     assert vb.JUDGE_MODEL == vb.QGEN_MODEL
+
+
+# ---------------------------------------------------------------------------
+# Full-run guards in the engine (title hygiene, anchor-type gate, snippets)
+# ---------------------------------------------------------------------------
+
+
+def test_engine_title_hygiene_filters_before_llm():
+    vb.USAGE.reset()
+    fakes = Fakes()
+    orig = fakes.sample
+
+    def dirty_sample(template=None, rng=None, **kw):
+        p = orig(template=template, rng=rng, **kw)
+        slot = next(iter(p.anchors))
+        p.anchors[slot]["title"] = "Bad/Title"
+        return p
+
+    engine, fakes, _ = make_engine(n=3, fakes=fakes, max_attempts=8)
+    engine._sample = dirty_sample
+    stats = engine.run()
+    assert stats.accepted == 0
+    assert stats.title_filtered == 8
+    assert fakes.verbalized == 0  # never reached the LLM
+
+
+def test_engine_counts_anchor_type_rejects():
+    vb.USAGE.reset()
+    fakes = Fakes()
+
+    def gate_fires(semantics, relations, style=None, anchors_info=None, **kw):
+        raise vb.AnchorRejected("anchor is a yearbook, not a school")
+
+    engine, fakes, logs = make_engine(n=3, fakes=fakes, max_attempts=6)
+    engine._verbalize = gate_fires
+    stats = engine.run()
+    assert stats.accepted == 0
+    assert stats.anchor_rejects == 6
+    assert stats.errors == 0  # counted as gate rejections, not errors
+    assert any("anchor-type gate" in x for x in logs)
+
+
+def test_engine_passes_abstract_snippets_to_verbalizer():
+    vb.USAGE.reset()
+    captured = {}
+    fakes = Fakes()
+
+    def capture_verbalize(semantics, relations, style=None, anchors_info=None, **kw):
+        captured["anchors_info"] = anchors_info
+        return "Which films qualify?"
+
+    engine, _, _ = make_engine(n=1, fakes=fakes, workers=1)
+    engine._verbalize = capture_verbalize
+    engine._abstract = lambda qid: f"Abstract text for {qid}. " + "x" * 300
+    engine.run()
+    info = captured["anchors_info"]
+    assert info and all("must be" in line for line in info)
+    assert any("Abstract text for" in line for line in info)
+    # snippet is truncated
+    assert all(len(line) < 350 for line in info)
+
+
+def test_anchor_descriptions_shapes():
+    from questiongen.generate import SNIPPET_CHARS, anchor_descriptions
+
+    t = gen.TEMPLATES_BY_HOPS[2][0]
+    pattern = make_pattern(t, 7)
+    # with abstracts
+    lines = anchor_descriptions(pattern, lambda q: "word " * 200)
+    assert len(lines) == len(t.anchors)
+    for line, role in zip(lines, t.roles):
+        assert f"must be {role}" in line
+    assert all('abstract: "word' in x for x in lines)
+    # without abstracts (sidecar missing / entity has none)
+    lines2 = anchor_descriptions(pattern, None)
+    assert all("(no abstract available)" in x for x in lines2)
+
+
+def test_stats_line_includes_guard_counters():
+    vb.USAGE.reset()
+    engine, _, _ = make_engine(n=2)
+    engine.run()
+    with engine._lock:
+        line = engine._stats_line()
+    assert "title_filtered=" in line and "anchor_rej=" in line

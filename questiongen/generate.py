@@ -142,8 +142,10 @@ class GenStats:
     accepted: int = 0
     attempts: int = 0
     sampler_miss: int = 0
+    title_filtered: int = 0  # title-hygiene pre-filter ('/', '#', empty, ==QID)
     kg_filtered: int = 0
     dupes: int = 0
+    anchor_rejects: int = 0  # verbalizer's anchor-type gate fired
     judge_rejects: Counter = field(default_factory=Counter)  # per judge model
     errors: int = 0
     by_difficulty: Counter = field(default_factory=Counter)
@@ -151,6 +153,46 @@ class GenStats:
     @property
     def judge_rejected(self) -> int:
         return sum(self.judge_rejects.values())
+
+
+SNIPPET_CHARS = 150
+
+
+def anchor_descriptions(pattern, get_abstract) -> list[str]:
+    """'"MIT" — must be an educational institution (...) — "The Massachusetts..."'
+
+    One line per anchor for the verbalizer's anchor-type gate. `get_abstract`
+    maps qid -> abstract text (or None); snippets are truncated to
+    SNIPPET_CHARS and flattened to one line.
+    """
+    out = []
+    tmpl = pattern.template
+    for slot, role in zip(tmpl.anchors, tmpl.roles):
+        a = pattern.anchors[slot]
+        abstract = (get_abstract(a["qid"]) if get_abstract else None) or ""
+        snippet = " ".join(abstract.split())[:SNIPPET_CHARS]
+        out.append(
+            f'"{a["title"]}" — must be {role} — abstract: '
+            f'"{snippet or "(no abstract available)"}"'
+        )
+    return out
+
+
+class _ThreadLocalSidecar:
+    """qid -> abstract via one read-only sqlite connection per worker thread
+    (sqlite3 connections must not be shared across threads)."""
+
+    def __init__(self, path: str):
+        self._path = path
+        self._tls = threading.local()
+
+    def abstract(self, qid: str) -> str | None:
+        from . import sidecar as sidecar_mod
+
+        side = getattr(self._tls, "side", None)
+        if side is None:
+            side = self._tls.side = sidecar_mod.SqliteSidecar(self._path)
+        return side.abstract(qid)
 
 
 class GenEngine:
@@ -178,6 +220,7 @@ class GenEngine:
         execute_fn=None,
         verbalize_fn=None,
         judge_fn=None,
+        abstract_fn=None,  # qid -> abstract text; arms the anchor-type gate
         log=print,
     ):
         self.n = n
@@ -197,6 +240,7 @@ class GenEngine:
         self._execute = execute_fn or kg_patterns.execute
         self._verbalize = verbalize_fn or verbalize.verbalize
         self._judge = judge_fn or verbalize.roundtrip_check
+        self._abstract = abstract_fn
 
         self.stats = GenStats()
         self.stop_reason: str | None = None
@@ -265,6 +309,13 @@ class GenEngine:
             self._maybe_attempt_stats()
             return True
 
+        # title hygiene (free) — junk anchors never reach the LLM
+        if not kg_patterns.anchors_ok(pattern):
+            with self._lock:
+                self.stats.title_filtered += 1
+            self._maybe_attempt_stats()
+            return True
+
         # dedupe BEFORE any LLM spend; reserve the key (a KG-filtered pattern
         # would fail identically next time, so the reservation stays)
         with self._lock:
@@ -286,7 +337,10 @@ class GenEngine:
         try:
             if self.use_llm:
                 question = self._verbalize(
-                    pattern.semantics, relations, style=chosen_style
+                    pattern.semantics,
+                    relations,
+                    style=chosen_style,
+                    anchors_info=anchor_descriptions(pattern, self._abstract),
                 )
                 for jm in self.judge_models:
                     verdict = self._judge(
@@ -299,6 +353,12 @@ class GenEngine:
                         return True
             else:
                 question = pattern.semantics  # deterministic scaffold fallback
+        except verbalize.AnchorRejected as exc:
+            with self._lock:
+                self.stats.anchor_rejects += 1
+            self.log(f"anchor-type gate: {exc}")
+            self._maybe_attempt_stats()
+            return True
         except Exception as exc:
             with self._lock:
                 self.stats.errors += 1
@@ -348,7 +408,8 @@ class GenEngine:
         mix = " ".join(f"{d}:{s.by_difficulty.get(d, 0)}" for d in sorted(self.targets))
         return (
             f"[stats] accepted={s.accepted}/{self.n} attempts={s.attempts} "
-            f"kg_filtered={s.kg_filtered} dupes={s.dupes} "
+            f"kg_filtered={s.kg_filtered} title_filtered={s.title_filtered} "
+            f"dupes={s.dupes} anchor_rej={s.anchor_rejects} "
             f"judge_rej={s.judge_rejected} miss={s.sampler_miss} errors={s.errors} | "
             f"cost=${cost:.2f} (${per_q:.4f}/q) | {rate:.1f} q/min | "
             f"ETA {eta_h:.1f}h | mix {mix}"
@@ -433,6 +494,18 @@ def main(argv: list[str] | None = None) -> int:
     )
     targets = parse_mix(args.mix) if args.mix else DIFFICULTY_TARGETS
 
+    # sidecar abstracts arm the verbalizer's anchor-type gate
+    from . import sidecar as sidecar_mod
+
+    abstract_fn = None
+    if sidecar_mod.available():
+        abstract_fn = _ThreadLocalSidecar(sidecar_mod.DB_PATH).abstract
+    elif use_llm:
+        print(
+            f"WARNING: sidecar not found at {sidecar_mod.DB_PATH} — the "
+            "anchor-type gate runs without abstract snippets (weaker)."
+        )
+
     engine = GenEngine(
         n=args.n,
         out_path=None if args.dry_run else args.out,
@@ -445,6 +518,7 @@ def main(argv: list[str] | None = None) -> int:
         use_llm=use_llm,
         targets=targets,
         stats_every=args.stats_every,
+        abstract_fn=abstract_fn,
     )
     print(
         f"generating: n={args.n} out={'(dry run)' if args.dry_run else args.out} "
@@ -465,6 +539,11 @@ def main(argv: list[str] | None = None) -> int:
             )
         if stats.judge_rejects:
             print(f"judge rejections by model: {dict(stats.judge_rejects)}")
+        if stats.anchor_rejects or stats.title_filtered:
+            print(
+                f"anchor guards: {stats.title_filtered} title-hygiene filtered, "
+                f"{stats.anchor_rejects} anchor-type rejected"
+            )
 
     if args.dry_run:
         for r in engine.records:
