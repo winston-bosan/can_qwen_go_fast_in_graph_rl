@@ -1,12 +1,29 @@
-"""CLI: generate KG-pattern questions -> data/questions/kg_pattern.jsonl.
+"""CLI: generate KG-pattern questions -> data/questions/*.jsonl (parallel).
 
 Pipeline per question: sample_pattern -> execute (exact golden sets, filters)
--> LLM verbalize (Prompt A) -> round-trip faithfulness check (Prompt B)
--> append JSONL.
+-> LLM verbalize (Prompt A) -> round-trip judge(s) (Prompt B) -> append JSONL.
+
+Engine properties (full-corpus hardening):
+  * ~16 worker threads (--workers) — neo4j driver and the OpenAI client are
+    both thread-safe; each attempt is an independent unit of work
+  * dedupe by (template, sorted anchor QIDs) — that tuple IS the record id,
+    so the id set doubles as the dedupe key; keys are reserved before any
+    LLM spend
+  * difficulty-mix targeting (--mix, default 40% 2-hop / 35% 3-hop /
+    25% 4-hop): next attempt's difficulty is drawn weighted by remaining
+    quota, so the mix converges without starving hard tiers
+  * dual/N-judge accept (--judge-models, comma-separated): a question is
+    kept only if EVERY judge accepts (cross-model judging; see
+    verbalize.JUDGE_MODEL)
+  * budget guard (--budget, default $80): aborts when OpenRouter-reported
+    cumulative cost crosses the cap
+  * checkpointed append: each accepted record is written+flushed
+    immediately; on restart, existing records are preloaded (ids + mix), so
+    the run is resumable toward the same --n total
+  * stats line every 100 accepted (and every 500 attempts)
 
 LLM: config.QGEN_MODEL via OpenRouter (OPENROUTER_API_KEY, auto-loaded from
-the repo-root .env by ecs.config). Prints a token-usage/cost summary at the
-end so cost per accepted question is measurable.
+the repo-root .env by ecs.config).
 
 Degrades gracefully:
   * neo4j down          -> clear skip message, exit 0
@@ -16,80 +33,378 @@ Degrades gracefully:
 
 Usage:
   .venv/bin/python -m questiongen.generate --n 20
-  .venv/bin/python -m questiongen.generate --n 5 --dry-run
-  .venv/bin/python -m questiongen.generate --n 1 --seed-qid Q49108 --template chain_film_director_school
+  .venv/bin/python -m questiongen.generate --n 15000 --workers 16 \\
+      --judge-models deepseek/deepseek-v4-pro,google/gemini-3.1-flash-lite \\
+      --out data/questions/kg_full.jsonl --budget 80
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import random
 import sys
+import threading
+import time
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 
 from ecs import config
 
 from . import kg_patterns, verbalize
-from .schema import QuestionRecord, append_records
+from .schema import QuestionRecord
 
 DEFAULT_OUT = os.path.join(config.DATA_DIR, "questions", "kg_pattern.jsonl")
+DEFAULT_WORKERS = 16
+DEFAULT_BUDGET_USD = 80.0
+DIFFICULTY_TARGETS: dict[int, float] = {2: 0.40, 3: 0.35, 4: 0.25}
+
+TEMPLATES_BY_HOPS: dict[int, list[kg_patterns.PatternTemplate]] = {}
+for _t in kg_patterns.PATTERNS:
+    TEMPLATES_BY_HOPS.setdefault(_t.hops, []).append(_t)
 
 
-def generate_one(
+# ---------------------------------------------------------------------------
+# Pure helpers (unit-tested)
+# ---------------------------------------------------------------------------
+
+
+def parse_mix(spec: str) -> dict[int, float]:
+    """'40,35,25' -> {2: .40, 3: .35, 4: .25} (normalized)."""
+    parts = [float(x) for x in spec.split(",")]
+    if len(parts) != 3 or any(p < 0 for p in parts) or sum(parts) <= 0:
+        raise ValueError(f"bad --mix {spec!r}; expected three non-negative numbers")
+    total = sum(parts)
+    return {2: parts[0] / total, 3: parts[1] / total, 4: parts[2] / total}
+
+
+def choose_difficulty(
+    by_difficulty: dict[int, int],
+    n: int,
     rng: random.Random,
-    seed_qid: str | None,
-    template: str | None,
-    style: str | None,
-    use_llm: bool,
-    client=None,
-) -> tuple[QuestionRecord | None, str]:
-    """Attempt one question; returns (record | None, status_message)."""
-    pattern = kg_patterns.sample_pattern(
-        seed_qid=seed_qid, template=template, rng=rng
-    )
-    if pattern is None:
-        return None, "sampler found no anchor binding"
-    result = kg_patterns.execute(pattern)
-    if result is None:
-        return None, f"{pattern.template.name}: answer set empty or >{kg_patterns.MAX_ANSWERS}"
-    answers, bridges = result
+    targets: dict[int, float] = DIFFICULTY_TARGETS,
+) -> int:
+    """Draw the next attempt's difficulty weighted by remaining quota.
 
-    relations = kg_patterns.relation_vocabulary(pattern.template)
-    chosen_style = style or rng.choice(sorted(verbalize.STYLE_VARIANTS))
+    Quota-weighted (not deficit-greedy) so a hard-to-fill tier pulls the mix
+    toward its target without starving the others.
+    """
+    remaining = {
+        d: max(targets[d] * n - by_difficulty.get(d, 0), 0.0) for d in targets
+    }
+    total = sum(remaining.values())
+    weights = remaining if total > 0 else dict(targets)  # quota met: target ratios
+    ds = sorted(weights)
+    pick = rng.random() * sum(weights[d] for d in ds)
+    acc = 0.0
+    for d in ds:
+        acc += weights[d]
+        if pick <= acc and weights[d] > 0:
+            return d
+    return max(ds, key=lambda d: weights[d])
 
-    if use_llm:
-        question = verbalize.verbalize(
-            pattern.semantics, relations, style=chosen_style, client=client
+
+def preload_existing(path: str) -> tuple[set[str], Counter]:
+    """Read an existing output file -> (record ids, difficulty counts).
+
+    The record id encodes (template, sorted anchor QIDs), so this both
+    resumes the count toward --n and seeds the dedupe set.
+    """
+    ids: set[str] = set()
+    by_difficulty: Counter = Counter()
+    if not os.path.exists(path):
+        return ids, by_difficulty
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue  # tolerate a torn tail line from a killed run
+            if obj.get("id") in ids:
+                continue
+            ids.add(obj["id"])
+            by_difficulty[int(obj.get("difficulty", 0))] += 1
+    return ids, by_difficulty
+
+
+# ---------------------------------------------------------------------------
+# Engine
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class GenStats:
+    accepted: int = 0
+    attempts: int = 0
+    sampler_miss: int = 0
+    kg_filtered: int = 0
+    dupes: int = 0
+    judge_rejects: Counter = field(default_factory=Counter)  # per judge model
+    errors: int = 0
+    by_difficulty: Counter = field(default_factory=Counter)
+
+    @property
+    def judge_rejected(self) -> int:
+        return sum(self.judge_rejects.values())
+
+
+class GenEngine:
+    """Thread-parallel generation with dedupe, mix targeting, budget guard.
+
+    The four pipeline stages are injectable so tests run the engine entirely
+    against in-memory fakes.
+    """
+
+    def __init__(
+        self,
+        n: int,
+        out_path: str | None,
+        judge_models: list[str],
+        *,
+        workers: int = DEFAULT_WORKERS,
+        budget_usd: float = DEFAULT_BUDGET_USD,
+        seed: int | None = None,
+        max_attempts: int | None = None,
+        style: str | None = None,
+        use_llm: bool = True,
+        targets: dict[int, float] = DIFFICULTY_TARGETS,
+        stats_every: int = 100,
+        sample_fn=None,
+        execute_fn=None,
+        verbalize_fn=None,
+        judge_fn=None,
+        log=print,
+    ):
+        self.n = n
+        self.out_path = out_path
+        self.judge_models = judge_models
+        self.workers = max(1, workers)
+        self.budget_usd = budget_usd
+        self.seed = seed if seed is not None else random.randrange(1 << 30)
+        self.max_attempts = max_attempts or max(10 * n, 20)
+        self.style = style
+        self.use_llm = use_llm
+        self.targets = targets
+        self.stats_every = stats_every
+        self.log = log
+
+        self._sample = sample_fn or kg_patterns.sample_pattern
+        self._execute = execute_fn or kg_patterns.execute
+        self._verbalize = verbalize_fn or verbalize.verbalize
+        self._judge = judge_fn or verbalize.roundtrip_check
+
+        self.stats = GenStats()
+        self.stop_reason: str | None = None
+        self.records: list[QuestionRecord] = []  # only kept when out_path is None
+        self._lock = threading.Lock()
+        self._fh = None
+        self._t0 = time.time()
+        self._session_accepted = 0
+
+        if out_path:
+            ids, by_diff = preload_existing(out_path)
+            self._seen = ids
+            self.stats.accepted = sum(by_diff.values())
+            self.stats.by_difficulty = by_diff
+            if ids:
+                self.log(
+                    f"resuming: {self.stats.accepted} existing records in "
+                    f"{out_path} (mix {dict(sorted(by_diff.items()))})"
+                )
+        else:
+            self._seen = set()
+
+    # -- stop conditions (call under lock) ----------------------------------
+
+    def _should_stop(self) -> bool:
+        if self.stop_reason:
+            return True
+        if self.stats.accepted >= self.n:
+            self.stop_reason = "target reached"
+            return True
+        if self.stats.attempts >= self.max_attempts:
+            self.stop_reason = f"max attempts ({self.max_attempts}) exhausted"
+            return True
+        if self.use_llm and verbalize.USAGE.cost_usd >= self.budget_usd:
+            self.stop_reason = (
+                f"BUDGET GUARD: cumulative cost ${verbalize.USAGE.cost_usd:.2f} "
+                f">= ${self.budget_usd:.2f} — aborting"
+            )
+            return True
+        return False
+
+    # -- one attempt ---------------------------------------------------------
+
+    def _attempt(self) -> bool:
+        """Run one attempt; False = engine should stop."""
+        with self._lock:
+            if self._should_stop():
+                return False
+            self.stats.attempts += 1
+            attempt_no = self.stats.attempts
+            rng = random.Random((self.seed << 20) ^ attempt_no)
+            difficulty = choose_difficulty(
+                self.stats.by_difficulty, self.n, rng, self.targets
+            )
+        template = rng.choice(TEMPLATES_BY_HOPS[difficulty])
+
+        try:
+            pattern = self._sample(template=template, rng=rng)
+        except kg_patterns.Neo4jUnavailable as exc:
+            with self._lock:
+                self.stop_reason = str(exc)
+            return False
+        if pattern is None:
+            with self._lock:
+                self.stats.sampler_miss += 1
+            self._maybe_attempt_stats()
+            return True
+
+        # dedupe BEFORE any LLM spend; reserve the key (a KG-filtered pattern
+        # would fail identically next time, so the reservation stays)
+        with self._lock:
+            if pattern.id in self._seen:
+                self.stats.dupes += 1
+                return True
+            self._seen.add(pattern.id)
+
+        result = self._execute(pattern)
+        if result is None:
+            with self._lock:
+                self.stats.kg_filtered += 1
+            self._maybe_attempt_stats()
+            return True
+        answers, bridges = result
+
+        relations = kg_patterns.relation_vocabulary(pattern.template)
+        chosen_style = self.style or rng.choice(sorted(verbalize.STYLE_VARIANTS))
+        try:
+            if self.use_llm:
+                question = self._verbalize(
+                    pattern.semantics, relations, style=chosen_style
+                )
+                for jm in self.judge_models:
+                    verdict = self._judge(
+                        question, relations, list(pattern.template.relations), model=jm
+                    )
+                    if not verdict.accept:
+                        with self._lock:
+                            self.stats.judge_rejects[jm] += 1
+                        self._maybe_attempt_stats()
+                        return True
+            else:
+                question = pattern.semantics  # deterministic scaffold fallback
+        except Exception as exc:
+            with self._lock:
+                self.stats.errors += 1
+                if self.stats.errors >= 50:
+                    self.stop_reason = f"too many LLM errors (last: {exc})"
+                    return False
+            self.log(f"WARN attempt {attempt_no}: {type(exc).__name__}: {exc}")
+            return True
+
+        record = kg_patterns.to_record(pattern, answers, bridges, question)
+        with self._lock:
+            if self.stats.accepted >= self.n:
+                return False
+            self.stats.accepted += 1
+            self._session_accepted += 1
+            self.stats.by_difficulty[difficulty] += 1
+            self._write(record)
+            if self.stats.accepted % self.stats_every == 0:
+                self.log(self._stats_line())
+        return True
+
+    # -- output / stats ------------------------------------------------------
+
+    def _write(self, record: QuestionRecord) -> None:  # caller holds lock
+        if self.out_path is None:
+            self.records.append(record)
+            return
+        if self._fh is None:
+            os.makedirs(os.path.dirname(os.path.abspath(self.out_path)), exist_ok=True)
+            self._fh = open(self.out_path, "a", encoding="utf-8")
+        self._fh.write(record.to_jsonl_line() + "\n")
+        self._fh.flush()
+
+    def _maybe_attempt_stats(self) -> None:
+        with self._lock:
+            if self.stats.attempts % 500 == 0:
+                self.log(self._stats_line())
+
+    def _stats_line(self) -> str:  # caller holds lock
+        s = self.stats
+        elapsed = max(time.time() - self._t0, 1e-6)
+        rate = self._session_accepted / elapsed * 60
+        cost = verbalize.USAGE.cost_usd
+        per_q = cost / max(self._session_accepted, 1)
+        remaining = max(self.n - s.accepted, 0)
+        eta_h = (remaining / max(rate, 1e-6)) / 60
+        mix = " ".join(f"{d}:{s.by_difficulty.get(d, 0)}" for d in sorted(self.targets))
+        return (
+            f"[stats] accepted={s.accepted}/{self.n} attempts={s.attempts} "
+            f"kg_filtered={s.kg_filtered} dupes={s.dupes} "
+            f"judge_rej={s.judge_rejected} miss={s.sampler_miss} errors={s.errors} | "
+            f"cost=${cost:.2f} (${per_q:.4f}/q) | {rate:.1f} q/min | "
+            f"ETA {eta_h:.1f}h | mix {mix}"
         )
-        verdict = verbalize.roundtrip_check(
-            question, relations, list(pattern.template.relations), client=client
-        )
-        if not verdict.accept:
-            return None, f"{pattern.template.name}: round-trip rejected ({verdict.reason})"
-    else:
-        question = pattern.semantics  # deterministic scaffold fallback
 
-    record = kg_patterns.to_record(pattern, answers, bridges, question)
-    return record, f"{pattern.template.name}: ok ({len(answers)} answers, {len(bridges)} bridges)"
+    # -- run ------------------------------------------------------------------
+
+    def _worker(self) -> None:
+        while True:
+            try:
+                if not self._attempt():
+                    return
+            except Exception as exc:  # never let a worker die silently
+                with self._lock:
+                    self.stats.errors += 1
+                self.log(f"WARN worker error: {type(exc).__name__}: {exc}")
+
+    def run(self) -> GenStats:
+        with ThreadPoolExecutor(max_workers=self.workers) as pool:
+            for _ in range(self.workers):
+                pool.submit(self._worker)
+        with self._lock:
+            self.log(self._stats_line())
+            if self.stop_reason:
+                self.log(f"stopped: {self.stop_reason}")
+            if self._fh:
+                self._fh.close()
+                self._fh = None
+        return self.stats
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
 
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--n", type=int, default=10, help="questions to generate")
+    ap.add_argument("--n", type=int, default=10, help="target TOTAL records in --out")
     ap.add_argument("--dry-run", action="store_true", help="print records; don't write")
-    ap.add_argument("--out", default=DEFAULT_OUT, help="output JSONL (appended)")
-    ap.add_argument("--seed-qid", default=None, help="pin the primary anchor QID")
-    ap.add_argument("--template", default=None, choices=sorted(kg_patterns.TEMPLATES_BY_NAME))
+    ap.add_argument("--out", default=DEFAULT_OUT, help="output JSONL (appended, resumable)")
+    ap.add_argument("--workers", type=int, default=DEFAULT_WORKERS)
+    ap.add_argument("--budget", type=float, default=DEFAULT_BUDGET_USD,
+                    help="abort when cumulative OpenRouter cost (USD) crosses this")
+    ap.add_argument("--judge-models", default=None,
+                    help="comma-separated; question kept only if ALL accept "
+                    f"(default: {verbalize.JUDGE_MODEL}; env ECS_JUDGE_MODEL)")
+    ap.add_argument("--mix", default=None,
+                    help="difficulty mix 2,3,4-hop as e.g. '40,35,25' (default)")
     ap.add_argument("--style", default=None, choices=sorted(verbalize.STYLE_VARIANTS))
     ap.add_argument("--seed", type=int, default=None, help="rng seed")
-    ap.add_argument(
-        "--max-attempts", type=int, default=None,
-        help="sampling attempts before giving up (default 10*n)",
-    )
-    ap.add_argument(
-        "--require-llm", action="store_true",
-        help="fail instead of falling back to scaffold questions without an API key",
-    )
+    ap.add_argument("--max-attempts", type=int, default=None,
+                    help="attempt cap before giving up (default 10*n)")
+    ap.add_argument("--stats-every", type=int, default=100)
+    ap.add_argument("--require-llm", action="store_true",
+                    help="fail instead of falling back to scaffold questions without an API key")
     args = ap.parse_args(argv)
 
     if not kg_patterns.neo4j_available():
@@ -101,10 +416,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     use_llm = verbalize.have_api_key()
-    client = None
-    if use_llm:
-        client = verbalize._client()  # one client for the whole run
-    else:
+    if not use_llm:
         msg = (
             "OPENROUTER_API_KEY not set — questions will use the deterministic "
             "semantics scaffold and skip the round-trip check."
@@ -114,44 +426,56 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print(f"WARNING: {msg}")
 
-    rng = random.Random(args.seed)
-    max_attempts = args.max_attempts or max(10 * args.n, 20)
-    records: list[QuestionRecord] = []
-    attempts = 0
-    while len(records) < args.n and attempts < max_attempts:
-        attempts += 1
-        try:
-            record, status = generate_one(
-                rng, args.seed_qid, args.template, args.style, use_llm, client=client
-            )
-        except kg_patterns.Neo4jUnavailable as exc:
-            print(f"SKIP: {exc}")
-            return 0
-        print(f"[{attempts}] {status}")
-        if record is not None:
-            records.append(record)
+    judge_models = (
+        [m.strip() for m in args.judge_models.split(",") if m.strip()]
+        if args.judge_models
+        else [verbalize.JUDGE_MODEL]
+    )
+    targets = parse_mix(args.mix) if args.mix else DIFFICULTY_TARGETS
+
+    engine = GenEngine(
+        n=args.n,
+        out_path=None if args.dry_run else args.out,
+        judge_models=judge_models,
+        workers=args.workers,
+        budget_usd=args.budget,
+        seed=args.seed,
+        max_attempts=args.max_attempts,
+        style=args.style,
+        use_llm=use_llm,
+        targets=targets,
+        stats_every=args.stats_every,
+    )
+    print(
+        f"generating: n={args.n} out={'(dry run)' if args.dry_run else args.out} "
+        f"workers={engine.workers} gen={verbalize.QGEN_MODEL} "
+        f"judges={judge_models} budget=${args.budget:.0f} "
+        f"mix={ {d: round(v, 2) for d, v in targets.items()} }"
+    )
+    stats = engine.run()
 
     if use_llm and verbalize.USAGE.calls:
         u = verbalize.USAGE
-        print(f"LLM usage ({verbalize.QGEN_MODEL}): {u.summary()}")
-        if records:
+        print(f"LLM usage ({verbalize.QGEN_MODEL} + judges): {u.summary()}")
+        if engine._session_accepted:
             print(
-                f"accepted {len(records)}/{attempts} attempts "
-                f"(${u.cost_usd / len(records):.4f} per accepted question)"
+                f"accepted {engine._session_accepted} this session / "
+                f"{stats.attempts} attempts "
+                f"(${u.cost_usd / engine._session_accepted:.4f} per accepted question)"
             )
-
-    if not records:
-        print(f"no questions produced after {attempts} attempts")
-        return 1
+        if stats.judge_rejects:
+            print(f"judge rejections by model: {dict(stats.judge_rejects)}")
 
     if args.dry_run:
-        for r in records:
+        for r in engine.records:
             print(r.to_jsonl_line())
-        print(f"(dry run) {len(records)} records NOT written")
-    else:
-        append_records(args.out, records)
-        print(f"appended {len(records)} records -> {args.out}")
-    return 0
+        print(f"(dry run) {len(engine.records)} records NOT written")
+        return 0 if engine.records else 1
+    if stats.accepted == 0:
+        print(f"no questions produced after {stats.attempts} attempts")
+        return 1
+    print(f"total {stats.accepted} records in {args.out}")
+    return 0 if engine.stop_reason == "target reached" else 2
 
 
 if __name__ == "__main__":
