@@ -12,6 +12,18 @@ k: 50
 # (hard 0), so the format signal is (a) +0.1 bonus, (b) all-or-nothing gate.
 format_bonus: 0.1
 
+# Over-reporting (dump) penalty: reward -= w_dump * junk_count / k, where junk
+# = predicted entities (after dedup/truncation at k) in neither the answer nor
+# the bridge set. MEASURED (eval/tests/test_metrics.py, DESIGN.md amendment):
+# junk appended AFTER correct entities costs exactly 0.0 two-tier NDCG -- the
+# metric alone exerts no anti-dumping pressure once golden entities rank first.
+# This is a TRAINING-ONLY shaping term; eval/metrics.py stays pure. Default
+# 0.2: a fully-dumped 50-line list with 5 correct costs 0.2*45/50 = 0.18
+# (meaningful, not dominant). Set to 0 to disable (restores pre-amendment
+# behavior). Total is clamped at 0 and the hard-0-on-unparseable gate is
+# unaffected.
+w_dump: 0.2
+
 # Mild length penalty knob -- DEFAULT OFF. SID-1 controls response length via
 # max-token scheduling (see configs/*.yaml + launch/run_*.sh stages), not the
 # reward. Turn on only for ablations; keep coef small so it never dominates NDCG.

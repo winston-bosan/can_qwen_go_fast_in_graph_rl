@@ -62,7 +62,9 @@ def test_partial_answer_scores_between_zero_and_one():
     expected = ref_ndcg(["Q999", "Q42"], set(ANSWER), set(BRIDGE), k=50)
     assert 0.0 < res.task_score < 1.0
     assert res.task_score == pytest.approx(expected)
-    assert res.total == pytest.approx(expected + 0.1)
+    assert res.junk_count == 1  # Q999
+    assert res.dump_penalty == pytest.approx(0.2 * 1 / 50)
+    assert res.total == pytest.approx(expected + 0.1 - 0.2 * 1 / 50)
 
 
 def test_comments_and_ordering_respected():
@@ -105,7 +107,11 @@ def test_over_50_entities_truncated_before_scoring():
     assert res.parsed
     assert res.n_entities == 50
     assert res.task_score == pytest.approx(0.0)
-    assert res.total == pytest.approx(0.1)  # format bonus only
+    # 50 surviving entities are all junk: dump penalty 0.2*50/50 = 0.2 eats the
+    # 0.1 format bonus; total clamps at 0.
+    assert res.junk_count == 50
+    assert res.dump_penalty == pytest.approx(0.2)
+    assert res.total == pytest.approx(0.0)
 
 
 def test_truncated_flag_with_fallback_parser(monkeypatch):
@@ -119,13 +125,85 @@ def test_truncated_flag_with_fallback_parser(monkeypatch):
     assert res.truncated
     assert res.n_entities == 50
     assert res.task_score == pytest.approx(0.0)
-    assert res.total == pytest.approx(0.1)
+    assert res.junk_count == 50
+    assert res.total == pytest.approx(0.0)  # 0.1 format - 0.2 dump, clamped
 
 
 def test_exactly_50_not_flagged_truncated():
     qids = ["Q691283"] + [f"Q{i}" for i in range(2000, 2049)]
     res = compute_reward(block(*qids), ANSWER, BRIDGE)
     assert res.n_entities == 50 and not res.truncated
+
+
+# ---------------------------------------------------------------------------
+# Over-reporting (dump) penalty -- DESIGN.md amendment: two-tier NDCG is
+# measured-indifferent to junk appended after correct entities
+# (eval/tests/test_metrics.py::test_entity_dumping_junk_after_correct_is_free),
+# so the training reward charges w_dump * junk_count / k.
+# ---------------------------------------------------------------------------
+
+
+def test_dump_penalty_exact_for_trailing_junk():
+    # Workstream B's measured scenario: 5 correct then 40 junk -> NDCG stays
+    # exactly 1.0; the dump penalty is the ONLY anti-dumping pressure.
+    answer = [f"Q{i}" for i in range(1, 6)]
+    junk = [f"Q{i}" for i in range(1000, 1040)]  # 40 junk
+    res = compute_reward(block(*(answer + junk)), answer, [])
+    assert res.task_score == pytest.approx(1.0)  # trailing junk is NDCG-free
+    assert res.junk_count == 40
+    assert res.dump_penalty == pytest.approx(0.2 * 40 / 50)  # = 0.16 exactly
+    assert res.total == pytest.approx(1.0 + 0.1 - 0.16)
+
+
+def test_fully_dumped_50_list_costs_018():
+    # Coordinator's calibration point: 5 correct + 45 junk = full 50-line dump
+    # -> penalty 0.2 * 45/50 = 0.18 (meaningful, not dominant).
+    answer = [f"Q{i}" for i in range(1, 6)]
+    junk = [f"Q{i}" for i in range(1000, 1045)]  # 45 junk
+    res = compute_reward(block(*(answer + junk)), answer, [])
+    assert res.n_entities == 50
+    assert res.junk_count == 45
+    assert res.dump_penalty == pytest.approx(0.18)
+    assert res.total == pytest.approx(1.0 + 0.1 - 0.18)
+
+
+def test_w_dump_zero_restores_old_behavior():
+    cfg = RewardConfig(w_dump=0.0)
+    answer = [f"Q{i}" for i in range(1, 6)]
+    junk = [f"Q{i}" for i in range(1000, 1045)]
+    res = compute_reward(block(*(answer + junk)), answer, [], config=cfg)
+    assert res.dump_penalty == 0.0
+    assert res.total == pytest.approx(1.0 + 0.1)  # pre-amendment total
+
+
+def test_bridge_entities_are_not_junk():
+    res = compute_reward(block("Q691283", "Q42"), ANSWER, BRIDGE)
+    assert res.junk_count == 0
+    assert res.dump_penalty == 0.0
+    assert res.total == pytest.approx(1.1)
+
+
+def test_dump_penalty_clamps_total_at_zero():
+    cfg = RewardConfig(w_dump=10.0)  # absurd weight: penalty 10*49/50 = 9.8
+    qids = ["Q691283"] + [f"Q{i}" for i in range(3000, 3049)]
+    res = compute_reward(block(*qids), ANSWER, BRIDGE, config=cfg)
+    assert res.junk_count == 49
+    assert res.total == 0.0  # clamped, never negative
+
+
+def test_dump_penalty_does_not_resurrect_unparseable():
+    cfg = RewardConfig(w_dump=0.0)  # even with every penalty disabled...
+    res = compute_reward("no entities block", ANSWER, BRIDGE, config=cfg)
+    assert res.total == 0.0 and not res.parsed  # ...hard 0 gate unchanged
+
+
+def test_w_dump_loaded_from_yaml(tmp_path):
+    import yaml as _yaml
+
+    path = tmp_path / "reward.yaml"
+    path.write_text(_yaml.safe_dump({"metric": "two_tier", "w_dump": 0.5}))
+    cfg = RewardConfig.load(str(path))
+    assert cfg.w_dump == 0.5
 
 
 # ---------------------------------------------------------------------------
@@ -138,7 +216,8 @@ def test_recall_metric():
     sol = block("Q691283", "Q42", "Q999")
     res = compute_reward(sol, ["Q691283", "Q123456"], BRIDGE, config=cfg)
     assert res.task_score == pytest.approx(0.5)  # 1 of 2 answer QIDs found
-    assert res.total == pytest.approx(0.6)
+    # dump penalty applies to the recall variant too (Q999 is junk)
+    assert res.total == pytest.approx(0.5 + 0.1 - 0.2 * 1 / 50)
 
 
 def test_length_penalty_off_by_default():

@@ -62,17 +62,31 @@ python -m training.data                           # data/questions/*.jsonl -> da
 `rollout_smoke.py` runs Qwen3-0.6B (fits the 3060 in fp16, ~17s/episode) through
 the same schemas / hermes tool-call format / answer parser / reward the verl run
 uses. Verified passing 2026-07-07: 2 assistant turns, 5 tool calls, reward
-0.860 (NDCG 0.760 + 0.1 format) on the built-in sample question.
+0.8562 (NDCG 0.7602 + 0.1 format − 0.004 dump penalty for 1 junk entity) on the
+built-in sample question.
 
 ## Reward (env/reward.py + configs/reward.yaml)
 
+`total = max(0, task + format_bonus − dump_penalty − length_penalty)`
+
 - parse final assistant message with `ecs.answer.parse_entities` (single source
   of truth; ≤50 QIDs)
-- **unparseable → hard 0.0 total** (no format bonus, no partial credit)
+- **unparseable → hard 0.0 total** (no format bonus, no partial credit; no knob
+  changes this)
 - task score: `eval.metrics.ndcg_two_tier(predicted, answer, bridge, k=50)`
   (single source of truth; `metric: recall` in reward.yaml switches to
   `recall_at_k` for ablations)
 - `+0.1` format bonus for a well-formed block
+- **dump penalty** `w_dump * junk_count / k` (default `w_dump: 0.2`, `0`
+  disables): junk = predicted entities (after dedup/truncation at k=50) in
+  neither the answer nor the bridge set. Rationale — MEASURED by workstream B
+  (`eval/tests/test_metrics.py`, DESIGN.md amendment): junk appended *after*
+  correct entities costs exactly 0.0 two-tier NDCG (40 junk after 5 correct:
+  1.0 → 1.0; the same junk *before*: 0.3107), so the metric alone exerts no
+  anti-dumping pressure. Calibration: a fully-dumped 50-line list with 5
+  correct costs 0.2·45/50 = **0.18** — meaningful, not dominant. This is a
+  *training-only shaping term*; `eval/metrics.py` stays pure and eval reports
+  F1 alongside NDCG to expose dumping.
 - length penalty knob (`length_penalty.enabled`, default **off**) —
   `coef * max(0, response_tokens - target)`; SID-1 controls length via token
   scheduling instead, keep this off unless ablating
@@ -84,6 +98,7 @@ uses. Verified passing 2026-07-07: 2 assistant turns, 5 tool calls, reward
 | GRPO without SFT | configs: `adv_estimator: grpo`, `use_kl_loss: false` (no SFT anchor) |
 | NDCG reward | env/reward.py → eval/metrics.py `ndcg_two_tier` |
 | Format reward | reward.yaml `format_bonus: 0.1` + hard-0 gate on unparseable |
+| Entity dumping (NDCG blind spot) | reward.yaml `w_dump: 0.2` → `w_dump·junk/k` training-only penalty (metric itself stays pure in eval/metrics.py) |
 | Length scheduling | staged runs in launch/run_*.sh (`LENGTH_SCHEDULE`), resume via `trainer.resume_mode: auto`; verl can't ramp `max_response_length` in-run |
 | Tokens-in/tokens-out | verl sglang delta tokenization + `multi_turn.tokenization_sanity_check_mode: strict` |
 | GRPO length-norm caveat | `loss_agg_mode: token-mean` (batch-token mean, not per-seq mean); `norm_adv_by_std_in_grpo` documented in configs — flip to `false` (Dr. GRPO) if length collapse appears |

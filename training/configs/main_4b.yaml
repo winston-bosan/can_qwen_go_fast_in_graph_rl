@@ -93,6 +93,10 @@ actor_rollout_ref:
     fsdp_config:
       param_offload: true
 
+# Terminal reward = NDCG two-tier + format bonus - dump penalty
+# (w_dump*junk_count/k; two-tier NDCG is measured-indifferent to trailing
+# junk, DESIGN.md amendment) - optional length penalty. Knobs live in
+# training/configs/reward.yaml (ECS_REWARD_CONFIG), not here.
 custom_reward_function:
   path: training/env/reward.py
   name: compute_score

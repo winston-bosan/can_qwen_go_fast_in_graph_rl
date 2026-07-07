@@ -197,6 +197,7 @@ async def run_episode(args: argparse.Namespace, question: dict[str, Any]) -> int
           f"generated tokens: {total_gen_tokens} | wall: {time.time() - t0:.1f}s")
     print(f"reward: total={result.total:.4f}  task({'ndcg' if result.parsed else '-'})="
           f"{result.task_score:.4f}  format=+{result.format_bonus if result.parsed else 0:.2f}  "
+          f"dump_pen=-{result.dump_penalty:.4f} (junk={result.junk_count})  "
           f"len_pen=-{result.length_penalty:.4f}  parsed={result.parsed}  "
           f"n_entities={result.n_entities}")
     print("=" * 78)

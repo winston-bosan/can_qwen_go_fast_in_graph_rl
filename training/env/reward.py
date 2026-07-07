@@ -1,4 +1,4 @@
-"""Terminal reward for GRPO: two-tier entity-NDCG + format reward + optional length penalty.
+"""Terminal reward for GRPO: two-tier entity-NDCG + format reward + shaping penalties.
 
 Follows SID-1's reward shape:
   - task reward   : ndcg_two_tier(predicted, answer, bridge, k=50)  (or plain recall,
@@ -6,8 +6,19 @@ Follows SID-1's reward shape:
   - format reward : +0.1 if the final message contains a well-formed ```entities block
   - hard zero     : unparseable final message -> total reward 0.0 (no partial credit;
                     this is the strongest lever to make the format stick without SFT)
+  - dump penalty  : w_dump * junk_count / k. MEASURED (eval/tests/test_metrics.py,
+                    DESIGN.md reward bullet as amended): junk appended AFTER correct
+                    entities costs exactly 0.0 two-tier NDCG, so the metric alone has
+                    NO anti-dumping pressure. This is a TRAINING-ONLY shaping term
+                    (eval/metrics.py stays pure); junk = predicted entities (after
+                    dedup/truncation at k) in neither the answer nor the bridge set.
+                    Default w_dump=0.2 -> a fully-dumped 50-line list with 5 correct
+                    costs 0.2*45/50 = 0.18: meaningful, not dominant. w_dump: 0 disables.
   - length penalty: mild, per-token over a budget, DEFAULT OFF (SID-1 controls length
                     with max-token scheduling, not the reward; knob kept for ablations)
+
+Total = max(0, task + format_bonus - dump_penalty - length_penalty); hard 0 on
+unparseable output is unaffected by any knob.
 
 Single sources of truth (this module implements NO metric of its own):
   - entity parsing : ``ecs.answer.parse_entities``  (src/ecs/, workstream A)
@@ -66,6 +77,10 @@ class RewardConfig:
     metric: str = "two_tier"  # "two_tier" (NDCG) | "recall" (answer-set recall@k)
     k: int = 50
     format_bonus: float = 0.1
+    # Over-reporting (dump) penalty weight: reward -= w_dump * junk_count / k,
+    # junk = predicted entities (post dedup/truncation at k) in neither the
+    # answer nor the bridge set. 0 disables. See module docstring / DESIGN.md.
+    w_dump: float = 0.2
     length_penalty: LengthPenaltyConfig = field(default_factory=LengthPenaltyConfig)
 
     @classmethod
@@ -77,7 +92,7 @@ class RewardConfig:
         with open(path) as f:
             raw = yaml.safe_load(f) or {}
         lp = LengthPenaltyConfig(**(raw.pop("length_penalty", None) or {}))
-        known = {k: v for k, v in raw.items() if k in {"metric", "k", "format_bonus"}}
+        known = {k: v for k, v in raw.items() if k in {"metric", "k", "format_bonus", "w_dump"}}
         cfg = cls(length_penalty=lp, **known)
         if cfg.metric not in ("two_tier", "recall"):
             raise ValueError(f"reward metric must be 'two_tier' or 'recall', got {cfg.metric!r}")
@@ -203,6 +218,8 @@ class RewardResult:
     total: float
     task_score: float = 0.0
     format_bonus: float = 0.0
+    dump_penalty: float = 0.0
+    junk_count: int = 0
     length_penalty: float = 0.0
     parsed: bool = False
     n_entities: int = 0
@@ -241,17 +258,26 @@ def compute_reward(
 
     fmt = cfg.format_bonus
 
-    penalty = 0.0
+    # Over-reporting penalty: two-tier NDCG is provably indifferent to junk
+    # appended after the golden entities (see module docstring); charge it here.
+    # `predicted` is already deduped (parser contract) and truncated at k<=50.
+    golden = answer | bridge
+    junk_count = sum(1 for q in predicted if q not in golden)
+    dump_penalty = cfg.w_dump * junk_count / cfg.k if cfg.w_dump else 0.0
+
+    length_penalty = 0.0
     if cfg.length_penalty.enabled and response_tokens is not None:
         over = max(0, response_tokens - cfg.length_penalty.target_tokens)
-        penalty = cfg.length_penalty.coef * over
+        length_penalty = cfg.length_penalty.coef * over
 
-    total = max(0.0, task + fmt - penalty)
+    total = max(0.0, task + fmt - dump_penalty - length_penalty)
     return RewardResult(
         total=total,
         task_score=task,
         format_bonus=fmt,
-        length_penalty=penalty,
+        dump_penalty=dump_penalty,
+        junk_count=junk_count,
+        length_penalty=length_penalty,
         parsed=True,
         n_entities=len(predicted),
         truncated=truncated,
