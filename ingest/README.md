@@ -74,3 +74,36 @@ to wipe and start over. Prints measured entities/s and tokens/s.
 
 The full 5M-entity run takes on the order of a day on an RTX 3060 — run it
 detached (or on a rented GPU pointing `ECS_QDRANT_URL` at this box).
+
+## bench_llamacpp.py — llama.cpp embedding parity + throughput
+
+Benchmarks the q8_0 GGUF of harrier-oss-v1-0.6b served by llama.cpp against
+the sentence-transformers fp16 stack. Serve first (official CUDA image):
+
+```bash
+docker run -d --name ecs-llamacpp --gpus all -p 7802:8080 \
+  -v $PWD/data/gguf:/models ghcr.io/ggml-org/llama.cpp:server-cuda \
+  -m /models/harrier-oss-v1-0.6b.Q8_0.gguf \
+  --embeddings --pooling last --embd-normalize 2 \
+  -ngl 99 -c 8192 -b 4096 -ub 2048 --parallel 4 --host 0.0.0.0 --port 8080
+```
+
+Then:
+
+```bash
+.venv/bin/python ingest/bench_llamacpp.py parity      # doc/query cosine ST vs llama.cpp
+.venv/bin/python ingest/bench_llamacpp.py retrieval   # top-10 overlap on temp collections
+.venv/bin/python ingest/bench_llamacpp.py bench       # ent/s + tokens/s
+```
+
+Tokenizer parity note: llama.cpp `add_special=true` appends the same trailing
+`<|endoftext|>` (151643) as the HF tokenizer, no BOS — matching ST's
+last-token pooling input exactly, so no prompt-template workarounds needed.
+
+2026-07 result on the RTX 3060 (toolserver idle, ST run paused): parity PASSES
+(mean doc cosine 0.9997, min 0.980; query 0.9998; top-10 overlap 9.7/10) but
+throughput LOSES: best llama.cpp q8_0 = 35-39 ent/s (~4.5-5.0k tok/s) across
+parallel/batch settings (4-32 slots, ub 1024-4096, FA on/off, f16 GGUF no
+better) vs sentence-transformers fp16 = 68.6 ent/s (8.6k tok/s). PyTorch's
+dense fp16 batching wins prompt-only embedding on this GPU; ST remains the
+production stack.
