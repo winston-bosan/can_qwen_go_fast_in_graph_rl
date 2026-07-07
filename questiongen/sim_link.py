@@ -19,6 +19,13 @@ Construction (per question):
 The golden set is exact by construction (deterministic given the index +
 graph + sidecar state).
 
+Embedder note: this module is embedding-model/dimension agnostic — it never
+embeds text. Anchors are sampled from the qdrant collection and neighbors
+are retrieved by querying with the anchor's STORED vector, so the
+docs-and-queries-must-match rule (DESIGN.md; canonical embedder
+harrier-270m, 640-dim) is satisfied by the index itself. Only free-text
+query embedding (which sim_link does not do) would need ecs.embedder.
+
 Service guarding: requires live qdrant + neo4j + sidecar. `main()` prints a
 clear SKIP message when any is missing. The candidate-selection logic
 (`find_text_link_candidates`, `build_scaffold`) is pure and unit-tested
@@ -146,6 +153,16 @@ def qdrant_available() -> bool:
         return True
     except Exception:
         return False
+
+
+def collection_dim() -> int | None:
+    """Vector size of the collection, or None when unreachable."""
+    try:
+        info = _qdrant().get_collection(config.QDRANT_COLLECTION)
+        vectors = info.config.params.vectors
+        return getattr(vectors, "size", None)
+    except Exception:
+        return None
 
 
 _client = None
@@ -288,6 +305,14 @@ def main(argv: list[str] | None = None) -> int:
             "qdrant` and build the index (ingest/) first."
         )
         return 0
+    dim = collection_dim()
+    if dim != config.EMBED_DIM:
+        print(
+            f"SKIP: collection '{config.QDRANT_COLLECTION}' is {dim}-dim but "
+            f"config.EMBED_DIM={config.EMBED_DIM} ({config.EMBED_MODEL}) — "
+            "stale index or rebuild in progress; rerun once the re-embed lands."
+        )
+        return 0
     if not neo4j_available():
         print(
             f"SKIP: neo4j not reachable at {config.NEO4J_URI} — start it with "
@@ -323,6 +348,16 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[{attempts}] {status}")
         if record is not None:
             records.append(record)
+
+    if use_llm and verbalize.USAGE.calls:
+        u = verbalize.USAGE
+        print(f"LLM usage ({verbalize.QGEN_MODEL}): {u.summary()}")
+        if records:
+            print(
+                f"accepted {len(records)}/{attempts} attempts "
+                f"(hit-rate {len(records) / attempts:.1%}, "
+                f"${u.cost_usd / len(records):.4f} per accepted question)"
+            )
 
     if not records:
         print(f"no questions produced after {attempts} attempts")
