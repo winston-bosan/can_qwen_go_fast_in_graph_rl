@@ -1,9 +1,15 @@
 """Build data/sidecar.db — sqlite lookup for entity text/aliases and relation labels.
 
 Tables:
-  entity(qid TEXT PRIMARY KEY, title TEXT, abstract TEXT)   -- title = first alias
+  entity(qid TEXT PRIMARY KEY, title TEXT, abstract TEXT)
   alias(qid TEXT, alias TEXT)                               -- indexed on alias
   relation(pid TEXT PRIMARY KEY, label TEXT)                -- label = first alias
+
+Title rule (DESIGN.md "Entity titles"): the Wikidata5M alias file is unordered,
+so "first alias" is noise. Title = the LONGEST alias that case-insensitively
+prefix-matches the entity's abstract opening (leading whitespace/quotes
+stripped, whitespace normalized on both sides); fallback = first alias;
+final fallback = QID. Entities with no abstract keep the alias/QID fallback.
 
 Idempotent: builds into data/sidecar.db.part, then atomically renames.
 
@@ -27,6 +33,42 @@ DB_PATH = os.path.join(config.DATA_DIR, "sidecar.db")
 ENTITY_ALIAS = os.path.join(WD5M, "wikidata5m_entity.txt")
 RELATION_ALIAS = os.path.join(WD5M, "wikidata5m_relation.txt")
 TEXT = os.path.join(WD5M, "wikidata5m_text.txt")
+
+_LEADING_QUOTES = "\"'“”‘’«»`"
+
+
+def _norm(s: str) -> str:
+    """Whitespace-normalize + casefold for comparison."""
+    return " ".join(s.split()).casefold()
+
+
+def _abstract_opening(abstract: str) -> str:
+    """Normalized abstract opening: leading whitespace/quotes stripped."""
+    return _norm(abstract.lstrip().lstrip(_LEADING_QUOTES).lstrip())
+
+
+def prefix_title(aliases: list[str], abstract: str) -> str | None:
+    """The longest alias that case-insensitively prefix-matches the abstract
+    opening, or None if no alias matches."""
+    opening = _abstract_opening(abstract)
+    best: str | None = None
+    best_len = 0
+    for a in aliases:
+        a_norm = _norm(a)
+        if a_norm and len(a_norm) > best_len and opening.startswith(a_norm):
+            best, best_len = a, len(a_norm)
+    return best
+
+
+def derive_title(aliases: list[str] | None, abstract: str | None, qid: str) -> str:
+    """Title rule per DESIGN.md: abstract-prefix match > first alias > QID."""
+    if not aliases:
+        return qid
+    if abstract:
+        best = prefix_title(aliases, abstract)
+        if best is not None:
+            return best
+    return aliases[0]
 
 
 def iter_tsv(path: str):
@@ -58,49 +100,62 @@ def main() -> None:
 
     t0 = time.time()
 
-    # entity aliases -> title (first alias) + alias table
-    n_ent = n_alias = 0
-    titles: list[tuple[str, str]] = []
+    # pass 1: alias table + in-memory alias map (needed for title derivation)
+    alias_map: dict[str, list[str]] = {}
     alias_rows: list[tuple[str, str]] = []
+    n_alias = 0
     for parts in iter_tsv(ENTITY_ALIAS):
         qid, aliases = parts[0], [a for a in parts[1:] if a]
         if not aliases:
             continue
-        titles.append((qid, aliases[0]))
+        alias_map.setdefault(qid, aliases)
         alias_rows.extend((qid, a) for a in aliases)
-        n_ent += 1
         n_alias += len(aliases)
         if len(alias_rows) >= 500_000:
-            con.executemany("INSERT OR IGNORE INTO entity VALUES(?,?,NULL)", titles)
             con.executemany("INSERT INTO alias VALUES(?,?)", alias_rows)
-            titles.clear()
             alias_rows.clear()
-    con.executemany("INSERT OR IGNORE INTO entity VALUES(?,?,NULL)", titles)
     con.executemany("INSERT INTO alias VALUES(?,?)", alias_rows)
     con.commit()
-    print(f"entities: {n_ent:,}  aliases: {n_alias:,}  ({time.time()-t0:.0f}s)")
-
-    # abstracts; entities present in text but missing from the alias file are
-    # inserted with title = qid so they still get embedded / looked up.
-    upsert = (
-        "INSERT INTO entity VALUES(?,?,?) "
-        "ON CONFLICT(qid) DO UPDATE SET abstract=excluded.abstract"
+    print(
+        f"alias entities: {len(alias_map):,}  aliases: {n_alias:,}  "
+        f"({time.time()-t0:.0f}s)"
     )
-    n_text = 0
+
+    # pass 2: abstracts -> entity rows with derived titles
+    n_text = n_prefix = 0
+    seen: set[str] = set()
     batch: list[tuple[str, str, str]] = []
     for parts in iter_tsv(TEXT):
         if len(parts) < 2:
             continue
         qid, abstract = parts[0], "\t".join(parts[1:])
-        batch.append((qid, qid, abstract))
+        aliases = alias_map.get(qid)
+        if aliases and prefix_title(aliases, abstract) is not None:
+            n_prefix += 1
+        title = derive_title(aliases, abstract, qid)
+        seen.add(qid)
+        batch.append((qid, title, abstract))
         n_text += 1
         if len(batch) >= 200_000:
-            con.executemany(upsert, batch)
+            con.executemany("INSERT OR REPLACE INTO entity VALUES(?,?,?)", batch)
             batch.clear()
-    con.executemany(upsert, batch)
-    cur = con.execute("SELECT COUNT(*) FROM entity WHERE abstract IS NOT NULL")
-    print(f"text entries: {n_text:,}  entities with abstract: {cur.fetchone()[0]:,}")
+    con.executemany("INSERT OR REPLACE INTO entity VALUES(?,?,?)", batch)
     con.commit()
+    print(
+        f"text entries: {n_text:,}  titles via abstract-prefix rule: {n_prefix:,} "
+        f"({100*n_prefix/max(n_text,1):.1f}%)  ({time.time()-t0:.0f}s)"
+    )
+
+    # pass 3: alias-only entities (no abstract) keep first-alias titles
+    rows = [
+        (qid, aliases[0], None)
+        for qid, aliases in alias_map.items()
+        if qid not in seen
+    ]
+    con.executemany("INSERT OR IGNORE INTO entity VALUES(?,?,?)", rows)
+    con.commit()
+    print(f"alias-only entities (no abstract): {len(rows):,}")
+    del alias_map
 
     # relations
     rel_rows = []
