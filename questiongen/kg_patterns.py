@@ -32,7 +32,10 @@ from ecs import config
 from .schema import QuestionRecord
 
 MAX_ANSWERS = 30
-ANCHOR_POOL_LIMIT = 2000  # bound the sampler's traversal cost
+# Bound on the sampler's anchor candidate pool. Large enough that (template,
+# anchors) dedupe over a 15k-question run doesn't exhaust any template's pool
+# (single-anchor templates can emit at most this many distinct questions).
+ANCHOR_POOL_LIMIT = 20000
 
 REL_LABELS: dict[str, str] = {
     "P69": "educated at",

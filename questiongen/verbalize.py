@@ -45,6 +45,13 @@ log = logging.getLogger(__name__)
 
 QGEN_MODEL = config.QGEN_MODEL
 
+# Round-trip judge model. Defaults to the generator model (self-judging) —
+# an external Opus-class calibration on the pilot output is in flight and
+# will decide whether production switches to a cross-model judge. Swappable
+# without code changes via ECS_JUDGE_MODEL (e.g. google/gemini-3.1-flash-lite,
+# verified live) or per-run via generate.py --judge-models.
+JUDGE_MODEL = os.environ.get("ECS_JUDGE_MODEL", QGEN_MODEL)
+
 STYLE_VARIANTS: dict[str, str] = {
     "direct": "a plain, direct factual question ('Which films ... ?')",
     "narrative": (
@@ -61,7 +68,8 @@ Paraphrase-diversity rules:
 - Do NOT copy the relation names verbatim; use natural synonyms
   (e.g. "educated at" -> "studied at", "attended"; "cast member" -> "starred in").
 - Vary sentence structure; do not start with "Which entity".
-- Refer to anchor entities by their titles exactly as given; never invent
+- Refer to anchor entities by their titles copied VERBATIM — preserve
+  capitalization, punctuation, and spacing exactly as given; never invent
   extra qualifiers (dates, nationalities) that are not in the pattern.
 - Never mention Wikidata, QIDs, Cypher, graphs, or the word "entity".
 - The question must ask for ALL qualifying items, not one example.
@@ -97,7 +105,10 @@ def _client():
 
 @dataclass
 class UsageTracker:
-    """Accumulates token usage / cost across calls (module-level: `USAGE`)."""
+    """Accumulates token usage / cost across calls (module-level: `USAGE`).
+
+    Thread-safe: parallel generation shares one tracker across ~16 workers.
+    """
 
     calls: int = 0
     prompt_tokens: int = 0
@@ -105,21 +116,28 @@ class UsageTracker:
     cost_usd: float = 0.0
     _t0: float = field(default_factory=time.time)
 
+    def __post_init__(self) -> None:
+        import threading
+
+        self._lock = threading.Lock()
+
     def add(self, usage) -> None:
-        self.calls += 1
-        if usage is None:
-            return
-        self.prompt_tokens += getattr(usage, "prompt_tokens", 0) or 0
-        self.completion_tokens += getattr(usage, "completion_tokens", 0) or 0
-        # OpenRouter reports credit cost on usage.cost when requested
-        self.cost_usd += getattr(usage, "cost", 0.0) or 0.0
+        with self._lock:
+            self.calls += 1
+            if usage is None:
+                return
+            self.prompt_tokens += getattr(usage, "prompt_tokens", 0) or 0
+            self.completion_tokens += getattr(usage, "completion_tokens", 0) or 0
+            # OpenRouter reports credit cost on usage.cost when requested
+            self.cost_usd += getattr(usage, "cost", 0.0) or 0.0
 
     def reset(self) -> None:
-        self.calls = 0
-        self.prompt_tokens = 0
-        self.completion_tokens = 0
-        self.cost_usd = 0.0
-        self._t0 = time.time()
+        with self._lock:
+            self.calls = 0
+            self.prompt_tokens = 0
+            self.completion_tokens = 0
+            self.cost_usd = 0.0
+            self._t0 = time.time()
 
     def summary(self) -> str:
         return (
@@ -304,12 +322,13 @@ def roundtrip_check(
     relations_available: list[str],
     expected_pids: list[str],
     client=None,
-    model: str = QGEN_MODEL,
+    model: str = JUDGE_MODEL,
 ) -> JudgeResult:
     """Prompt B: judge whether `question` uniquely maps back to the pattern.
 
     `relations_available` are human-readable entries like 'P69 (educated at)'
     — the judge sees only the question and this vocabulary, never the pattern.
+    Defaults to the cross-model JUDGE_MODEL (not the generator model).
     """
     prompt = build_judge_prompt(question, relations_available)
     text = _chat(prompt, client=client, model=model)
