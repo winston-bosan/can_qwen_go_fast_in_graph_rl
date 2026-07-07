@@ -1,0 +1,111 @@
+# Main run: Qwen3-4B GRPO, sglang multi-turn tool calling.
+# Sized for ONE 8xH100-80GB node (colocated sglang + FSDP actor, hybrid engine).
+#
+# Launch: training/launch/run_main.sh  (does the staged length scheduling)
+#
+# ---------------------------------------------------------------------------
+# Re-sizing for a SINGLE RunPod B300 (288GB HBM, one giant GPU):
+#   trainer.n_gpus_per_node: 1
+#   actor_rollout_ref.rollout.tensor_model_parallel_size: 1
+#   actor_rollout_ref.rollout.gpu_memory_utilization: 0.45
+#       (colocated vLLM/sglang + FSDP on ONE device: 4B weights+grads+adam in
+#        bf16/fp32 ~= 64GB, activations w/ grad-checkpointing ~20-40GB at 16k;
+#        0.45 * 288GB ~= 130GB for the rollout engine's weights+KV -- roomy)
+#   actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu: 16
+#       (288GB >> 80GB; fewer, larger micro-batches)
+#   fsdp_config.param_offload / optimizer_offload: false (no need)
+#   Throughput note: one B300 gives ~1/4 the rollout tokens/s of 8xH100 --
+#   expect ~3-4x wall-clock per step; batch/group sizes DO NOT need to change
+#   (gradient accumulation handles it), so learning dynamics are identical.
+# ---------------------------------------------------------------------------
+#
+# SID-1 recipe notes: see validate_0p6b.yaml header (GRPO w/o SFT; terminal
+# NDCG + format reward; length scheduling via staged runs in run_main.sh;
+# TI/TO handled by verl's delta tokenization + sanity check).
+
+hydra:
+  searchpath:
+    - pkg://verl.trainer.config   # works with pip-installed verl (no repo checkout needed)
+
+defaults:
+  - ppo_trainer
+  - _self_
+
+data:
+  train_files: data/rl/train.parquet
+  val_files: data/rl/val.parquet
+  train_batch_size: 64                  # questions per step
+  max_prompt_length: 4096
+  # 16k total context. Length scheduling (SID-1): run_main.sh overrides this
+  # per stage: 4096 -> 8192 -> 12288, resuming from the previous stage's
+  # checkpoint. Short caps early keep rollouts cheap while the policy learns
+  # the format + tool loop; the cap is raised as trajectories earn it.
+  max_response_length: 12288
+  return_raw_chat: true
+  shuffle: true
+  filter_overlong_prompts: true
+  truncation: error
+
+algorithm:
+  adv_estimator: grpo
+  use_kl_in_reward: false
+  # See validate_0p6b.yaml: consider false + token-mean loss (Dr. GRPO) if
+  # length collapse appears once the response cap is raised.
+  norm_adv_by_std_in_grpo: true
+
+actor_rollout_ref:
+  hybrid_engine: true
+  model:
+    path: Qwen/Qwen3-4B
+    use_remove_padding: true
+    enable_gradient_checkpointing: true
+  actor:
+    optim:
+      lr: 1.0e-6
+      lr_warmup_steps: 10
+    ppo_mini_batch_size: 64
+    ppo_micro_batch_size_per_gpu: 4     # 8xH100: 1024 rollouts / 8 GPUs / 4 = 32 accum steps
+    use_kl_loss: false                  # GRPO w/o SFT (SID-1); see validate config
+    kl_loss_coef: 0.001
+    kl_loss_type: low_var_kl
+    entropy_coeff: 0
+    loss_agg_mode: token-mean           # GRPO length-bias mitigation (Dr. GRPO-style agg)
+    fsdp_config:
+      param_offload: false
+      optimizer_offload: false
+  rollout:
+    name: sglang
+    n: 16                               # GRPO group size: 16 rollouts x 64 questions = 1024/step
+    temperature: 1.0
+    top_p: 1.0
+    prompt_length: ${data.max_prompt_length}
+    response_length: ${data.max_response_length}
+    gpu_memory_utilization: 0.55
+    tensor_model_parallel_size: 2       # 4B fits on one H100; tp=2 gives KV headroom at 16k
+    multi_turn:
+      enable: true
+      max_assistant_turns: 9            # 8 tool-call turns + final answer
+      max_user_turns: 8
+      format: hermes
+      tool_config_path: training/configs/tools_ecs.yaml
+      tokenization_sanity_check_mode: strict   # TI/TO guard, see validate config
+  ref:
+    fsdp_config:
+      param_offload: true
+
+custom_reward_function:
+  path: training/env/reward.py
+  name: compute_score
+
+trainer:
+  project_name: ecs-grpo
+  experiment_name: main-qwen3-4b
+  logger: ["console", "wandb"]
+  n_gpus_per_node: 8
+  nnodes: 1
+  save_freq: 20
+  test_freq: 10
+  total_epochs: 3
+  val_before_train: true
+  default_local_dir: checkpoints/${trainer.project_name}/${trainer.experiment_name}
+  resume_mode: auto                     # required by run_main.sh's staged length schedule

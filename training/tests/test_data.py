@@ -61,7 +61,8 @@ def test_row_format_matches_verl_expectations():
     assert xi["need_tools_kwargs"] is True
     assert set(xi["tools_kwargs"]) == set(TOOL_NAMES)
     for kw in xi["tools_kwargs"].values():
-        assert kw == {"create_kwargs": {}}
+        # non-empty struct: Arrow cannot write empty structs to parquet
+        assert kw == {"create_kwargs": {"question_id": "q-00007"}}
 
 
 def test_curriculum_sorted_orders_easy_to_hard():

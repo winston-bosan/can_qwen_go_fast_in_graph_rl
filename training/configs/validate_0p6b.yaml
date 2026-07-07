@@ -1,0 +1,111 @@
+# Validation run: Qwen3-0.6B GRPO, sglang multi-turn tool calling.
+# Sized for 1-2 GPUs (2x anything >= 24GB is comfortable; runs on 1x A100/H100,
+# and squeezes onto 1x 4090/3090-24GB with gpu_memory_utilization lowered).
+#
+# Launch: training/launch/run_validate.sh  (hydra config-name=validate_0p6b)
+#
+# SID-1 recipe notes (https://www.sid.ai/research/sid-1-technical-report):
+#   - GRPO from the base/instruct model, NO SFT warm start.
+#   - Terminal reward only: two-tier NDCG + format bonus (training/env/reward.py).
+#   - Length scheduling: max response tokens ramped across run stages -- verl has
+#     no in-run scheduler for data.max_response_length, so launch/run_*.sh does
+#     staged runs with checkpoint resume (see LENGTH_STAGES there).
+#   - TI/TO (tokens-in-tokens-out): verl's sglang rollout hands token ids straight
+#     to training (delta-based tokenization of each new message), so rollout and
+#     learner never disagree on retokenization; multi_turn.tokenization_sanity_check_mode
+#     below keeps a guard on it. This is the verl equivalent of SID-1's TI/TO fix.
+
+hydra:
+  searchpath:
+    - pkg://verl.trainer.config   # works with pip-installed verl (no repo checkout needed)
+
+defaults:
+  - ppo_trainer          # verl's base config -- we override below
+  - _self_
+
+data:
+  train_files: data/rl/train.parquet    # produced by: python -m training.data
+  val_files: data/rl/val.parquet
+  train_batch_size: 32                  # questions per step (prompts, not rollouts)
+  max_prompt_length: 2048               # system + question + tool schemas fit well under this
+  max_response_length: 6144             # whole multi-turn tail: 2048 + 6144 = 8k context
+  return_raw_chat: true                 # REQUIRED for multi-turn: rollout needs message lists
+  shuffle: true                         # set false when using --curriculum sorted/mixed order
+  filter_overlong_prompts: true
+  truncation: error
+
+algorithm:
+  adv_estimator: grpo
+  use_kl_in_reward: false
+  # GRPO length-norm caveat (Dr. GRPO): dividing per-sequence rewards by std and
+  # averaging loss per-sequence biases toward long/short degenerate responses.
+  # Keep std-normalization on for the small validation run (matches vanilla GRPO);
+  # flip to false (Dr. GRPO style) together with loss_agg_mode=token-mean if you
+  # see length collapse or reward-std spikes on near-solved groups.
+  norm_adv_by_std_in_grpo: true
+
+actor_rollout_ref:
+  hybrid_engine: true
+  model:
+    path: Qwen/Qwen3-0.6B
+    use_remove_padding: true
+    enable_gradient_checkpointing: true
+  actor:
+    optim:
+      lr: 1.0e-6
+    ppo_mini_batch_size: 32             # one gradient pass over the whole step
+    ppo_micro_batch_size_per_gpu: 4     # 8k-token sequences on a 0.6B: fine on 24GB+
+    use_kl_loss: false                  # no SFT policy to anchor to (SID-1: GRPO w/o SFT);
+                                        # enable (coef ~1e-3) only if outputs degenerate
+    kl_loss_coef: 0.001
+    kl_loss_type: low_var_kl
+    entropy_coeff: 0
+    # Token-mean over the batch (not per-sequence mean): avoids the GRPO length
+    # bias where long wrong answers get their per-token penalty diluted.
+    loss_agg_mode: token-mean
+    fsdp_config:
+      param_offload: false
+      optimizer_offload: false
+  rollout:
+    name: sglang
+    n: 8                                # GRPO group size: 8 rollouts per question
+    temperature: 1.0
+    top_p: 1.0
+    prompt_length: ${data.max_prompt_length}
+    response_length: ${data.max_response_length}
+    gpu_memory_utilization: 0.5         # colocated with FSDP actor (hybrid engine)
+    tensor_model_parallel_size: 1
+    multi_turn:
+      enable: true
+      # 8 tool-call turns + 1 final answer turn. The rollout also stops early
+      # when the model responds without a tool call.
+      max_assistant_turns: 9
+      max_user_turns: 8                 # tool responses count as user-side turns
+      format: hermes                    # Qwen3 <tool_call> JSON format
+      tool_config_path: training/configs/tools_ecs.yaml
+      # TI/TO guard: fail fast if delta-tokenization ever mismatches a full
+      # re-tokenization of the dialog (chat-template drift, added tokens, ...).
+      tokenization_sanity_check_mode: strict
+  ref:
+    fsdp_config:
+      param_offload: true
+
+# Terminal reward: training/env/reward.py (NDCG two-tier + format bonus).
+# Reward variant (two_tier vs recall, length-penalty knob) is selected via
+# training/configs/reward.yaml, NOT here -- see ECS_REWARD_CONFIG.
+custom_reward_function:
+  path: training/env/reward.py
+  name: compute_score
+
+trainer:
+  project_name: ecs-grpo
+  experiment_name: validate-qwen3-0.6b
+  logger: ["console", "wandb"]
+  n_gpus_per_node: 2                    # set 1 for a single-GPU box; raise micro-batch if >2
+  nnodes: 1
+  save_freq: 25
+  test_freq: 10
+  total_epochs: 5
+  val_before_train: true
+  default_local_dir: checkpoints/${trainer.project_name}/${trainer.experiment_name}
+  resume_mode: auto                     # lets run_validate.sh do staged length scheduling

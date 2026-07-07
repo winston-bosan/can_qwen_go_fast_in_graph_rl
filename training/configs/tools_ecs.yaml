@@ -1,0 +1,110 @@
+# verl multi-turn tool config (actor_rollout_ref.rollout.multi_turn.tool_config_path).
+# Wires the four ECS tool-server endpoints into sglang's tool-calling rollout.
+#
+# Tool server URL: the adapter classes read ECS_TOOLSERVER_URL (default
+# http://localhost:7801, see src/ecs/config.py) unless base_url is set below.
+# Schemas mirror toolserver/schema.py (canonical, workstream A) / DESIGN.md;
+# training/env/tools.py prefers toolserver.schema at import time when present.
+
+tools:
+  - class_name: training.env.tools.VectorSearchTool
+    config:
+      type: native
+      timeout: 30            # seconds per call; client retries once on 5xx/transport errors
+      max_result_chars: 6000 # truncate huge payloads before they hit the context
+    tool_schema:
+      type: function
+      function:
+        name: vector_search
+        description: >-
+          Semantic search over Wikipedia/Wikidata entity abstracts. Returns the
+          k most similar entities to the query.
+        parameters:
+          type: object
+          properties:
+            query:
+              type: string
+              description: Natural-language search query.
+            k:
+              type: integer
+              description: Number of results (1-50).
+          required: ["query"]
+
+  - class_name: training.env.tools.GetEntityTool
+    config:
+      type: native
+      timeout: 30
+      max_result_chars: 6000
+    tool_schema:
+      type: function
+      function:
+        name: get_entity
+        description: >-
+          Fetch one entity by Wikidata QID: title, abstract, aliases, and
+          in/out degree in the knowledge graph.
+        parameters:
+          type: object
+          properties:
+            qid:
+              type: string
+              description: Wikidata QID, e.g. 'Q42'.
+          required: ["qid"]
+
+  - class_name: training.env.tools.GetNeighborsTool
+    config:
+      type: native
+      timeout: 30
+      max_result_chars: 6000
+    tool_schema:
+      type: function
+      function:
+        name: get_neighbors
+        description: >-
+          List knowledge-graph edges of an entity (paginated; safe on hub
+          nodes). Optionally filter by relation P-id and direction.
+        parameters:
+          type: object
+          properties:
+            qid:
+              type: string
+              description: Wikidata QID, e.g. 'Q42'.
+            relation:
+              type: string
+              description: Optional Wikidata P-id filter, e.g. 'P69'.
+            direction:
+              type: string
+              enum: ["out", "in", "both"]
+            limit:
+              type: integer
+              description: Max edges to return (1-100).
+            offset:
+              type: integer
+              description: Pagination offset.
+          required: ["qid"]
+
+  - class_name: training.env.tools.FindPathsTool
+    config:
+      type: native
+      timeout: 30
+      max_result_chars: 6000
+    tool_schema:
+      type: function
+      function:
+        name: find_paths
+        description: Find knowledge-graph paths between two entities (up to max_hops).
+        parameters:
+          type: object
+          properties:
+            src_qid:
+              type: string
+              description: Source QID.
+            dst_qid:
+              type: string
+              description: Destination QID.
+            max_hops:
+              type: integer
+              description: Maximum path length in hops (1-4).
+            limit:
+              type: integer
+              description: Max paths to return (1-20).
+          required: ["src_qid", "dst_qid"]
