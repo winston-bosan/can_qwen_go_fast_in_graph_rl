@@ -1,0 +1,26 @@
+# Training-box requirements (rented GPU node). Install via launch/setup_remote.sh
+# -- order matters for flash-attn, the script handles it.
+#
+# verl[sglang] pins its own torch (2.9.1 for verl 0.8.0), transformers, and
+# sglang versions; do NOT pin torch separately here or pip will fight itself.
+
+verl[sglang]==0.8.0
+
+# env / data plumbing (versions matching the dev box)
+httpx==0.28.1
+pyyaml==6.0.3
+orjson>=3.10
+pandas>=2.2,<3
+pyarrow>=17
+
+# logging
+wandb>=0.19
+
+# tests on the training box (optional but cheap)
+pytest>=8
+
+# NOTE: flash-attn is installed separately by setup_remote.sh with
+# --no-build-isolation AFTER torch exists (its setup.py imports torch).
+# NOTE: the tool server's own deps (qdrant-client, neo4j, sentence-transformers)
+# are NOT listed here -- install the repo root pyproject on whichever box runs
+# the tool server (see training/README.md topology section).
