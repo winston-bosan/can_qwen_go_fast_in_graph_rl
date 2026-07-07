@@ -65,20 +65,33 @@ Flags: `--csv-only` (just regenerate CSVs), `--verify` (counts/spot query only).
 
 ## embed_qdrant.py
 
-Creates the `wiki_entities` collection (1024-dim, cosine, on-disk vectors) and
-upserts `title + ". " + abstract` embeddings (abstract truncated to ~400
-tokens) with payload `{qid, title}`; point id = integer part of the QID.
-Progress is checkpointed to `data/qdrant_embed_progress.json` after every
-batch — kill and re-run to resume. `--limit N` for smoke tests, `--restart`
-to wipe and start over. Prints measured entities/s and tokens/s.
+Creates the `wiki_entities` collection (640-dim for the canonical
+harrier-oss-v1-270m, cosine, on-disk vectors) and upserts
+`title + ". " + abstract` embeddings (abstract truncated to ~400 tokens) with
+payload `{qid, title}`; point id = integer part of the QID. Progress is
+checkpointed to `data/qdrant_embed_progress.json` after every batch — kill and
+re-run to resume. `--limit N` for smoke tests, `--restart` to wipe and start
+over. Prints measured entities/s and tokens/s. The dim guard refuses to write
+if the loaded model's dim doesn't match `config.EMBED_DIM` — the checkpoint
+and collection are model-specific, so switching models (e.g. to the 0.6b
+upgrade path) requires `--restart` after updating the config.
 
-The full 5M-entity run takes on the order of a day on an RTX 3060 — run it
-detached (or on a rented GPU pointing `ECS_QDRANT_URL` at this box).
+Dtype note: the 270m is Gemma3-based and produces all-NaN embeddings in fp16;
+`ecs.embedder` therefore uses bfloat16 on CUDA (see `ECS_EMBED_DTYPE`) and
+hard-fails on non-finite vectors rather than poisoning the index.
+
+Measured on the RTX 3060: 270m bf16 ≈ 260 ent/s (~32k tok/s) → full 4.94M
+corpus in ~5.5 h. Run it detached (or on a rented GPU pointing
+`ECS_QDRANT_URL` at this box). Historical, still-valid measurements for the
+0.6b upgrade path (fp16, 1024-dim): 68.6 ent/s solo / ~59 ent/s with the
+toolserver co-resident (~8.6k tok/s) → ~20-23 h full corpus.
 
 ## bench_llamacpp.py — llama.cpp embedding parity + throughput
 
-Benchmarks the q8_0 GGUF of harrier-oss-v1-0.6b served by llama.cpp against
-the sentence-transformers fp16 stack. Serve first (official CUDA image):
+Historical (2026-07, from when harrier-oss-v1-**0.6b** was the canonical
+embedder; conclusions about the llama.cpp-vs-PyTorch gap should transfer to
+the 270m but were not re-measured). Benchmarks a GGUF served by llama.cpp
+against the sentence-transformers stack. Serve first (official CUDA image):
 
 ```bash
 docker run -d --name ecs-llamacpp --gpus all -p 7802:8080 \

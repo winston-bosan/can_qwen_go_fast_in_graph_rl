@@ -1,16 +1,20 @@
 """Embedding wrapper over sentence-transformers for the harrier-oss models.
 
-Model: microsoft/harrier-oss-v1-0.6b (1024-dim, last-token pooling,
-L2-normalized). Fallback: microsoft/harrier-oss-v1-270m via
-ECS_EMBED_MODEL env var (same interface; note the 270m model may emit a
-different native dim — check `Embedder.dim`).
+Model: microsoft/harrier-oss-v1-270m (640-dim, Gemma3-based, last-token
+pooling, L2-normalized) — the canonical embedder per DESIGN.md. Upgrade path:
+microsoft/harrier-oss-v1-0.6b (1024-dim, Qwen3-based) via ECS_EMBED_MODEL
+(same interface, different native dim — check `Embedder.dim`; requires a full
+re-embed of the collection).
 
 - `embed_docs(texts)`: raw text, no prefix (title + abstract).
 - `embed_query(q)` / `embed_queries(qs)`: prefixed with the instruction from
   ecs.config (`Instruct: {instruction}\nQuery: {q}`).
 
-fp16 on CUDA when available, fp32 on CPU. Batched with a conservative
-default batch size for a 12GB card; override via ECS_EMBED_BATCH.
+Dtype on CUDA: bfloat16 when the GPU supports it, else float32 — NOT float16:
+Gemma-based models overflow to NaN in fp16 (empirically 100% of rows for the
+270m). Override with ECS_EMBED_DTYPE=float16|bfloat16|float32 if you know
+better. CPU stays float32. Batched with a conservative default batch size for
+a 12GB card; override via ECS_EMBED_BATCH.
 """
 
 from __future__ import annotations
@@ -44,7 +48,14 @@ class Embedder:
         self.batch_size = batch_size or int(os.environ.get("ECS_EMBED_BATCH", "32"))
         kwargs = {}
         if device.startswith("cuda"):
-            kwargs["model_kwargs"] = {"torch_dtype": torch.float16}
+            dtype_name = os.environ.get("ECS_EMBED_DTYPE")
+            if dtype_name:
+                dtype = getattr(torch, dtype_name)
+            elif torch.cuda.is_bf16_supported():
+                dtype = torch.bfloat16  # fp16 NaNs on Gemma-based models
+            else:
+                dtype = torch.float32
+            kwargs["model_kwargs"] = {"torch_dtype": dtype}
         self.model = SentenceTransformer(
             self.model_name, device=device, trust_remote_code=True, **kwargs
         )
@@ -76,7 +87,14 @@ class Embedder:
             convert_to_numpy=True,
             show_progress_bar=show_progress,
         )
-        return np.asarray(vecs, dtype=np.float32)
+        out = np.asarray(vecs, dtype=np.float32)
+        if not np.isfinite(out).all():
+            bad = int((~np.isfinite(out)).any(axis=1).sum())
+            raise ValueError(
+                f"{bad}/{len(out)} embeddings contain NaN/inf "
+                f"(model={self.model_name}, dtype overflow? see ECS_EMBED_DTYPE)"
+            )
+        return out
 
 
 _default: Embedder | None = None

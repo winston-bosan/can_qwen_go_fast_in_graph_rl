@@ -10,9 +10,11 @@ Start (after `docker compose up -d` and ingestion):
 # or: scripts/up.sh
 ```
 
-The embedding model is loaded lazily on the first `/vector_search` call
-(set `ECS_EMBED_MODEL=microsoft/harrier-oss-v1-270m` for the small fallback —
-note the index must have been built with the same model).
+The embedding model (default `microsoft/harrier-oss-v1-270m`, 640-dim) is
+loaded lazily on the first `/vector_search` call. `ECS_EMBED_MODEL=
+microsoft/harrier-oss-v1-0.6b` selects the 1024-dim quality-upgrade path, but
+queries and the index MUST use the same model — switching also requires a
+fully re-embedded collection.
 
 ## Endpoints
 

@@ -39,8 +39,13 @@ def main() -> None:
             f"{config.QDRANT_URL}/collections/{config.QDRANT_COLLECTION}", timeout=10
         )
         if r.status_code == 200:
-            pts = r.json()["result"]["points_count"]
-            print(f"qdrant    UP    {config.QDRANT_COLLECTION} points={pts:,}")
+            result = r.json()["result"]
+            pts = result["points_count"]
+            dim = result["config"]["params"]["vectors"]["size"]
+            flag = "" if dim == config.EMBED_DIM else f" (MISMATCH: config={config.EMBED_DIM})"
+            print(
+                f"qdrant    UP    {config.QDRANT_COLLECTION} points={pts:,} dim={dim}{flag}"
+            )
         else:
             httpx.get(f"{config.QDRANT_URL}/collections", timeout=10).raise_for_status()
             print(f"qdrant    UP    (collection {config.QDRANT_COLLECTION} missing)")

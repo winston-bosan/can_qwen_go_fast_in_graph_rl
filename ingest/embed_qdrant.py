@@ -1,6 +1,7 @@
 """Embed entity texts and upsert into the Qdrant `wiki_entities` collection.
 
-- Collection: 1024-dim cosine, vectors stored on disk (DESIGN.md).
+- Collection: config.EMBED_DIM cosine (640 for the canonical harrier-270m;
+  1024 for the 0.6b upgrade path), vectors stored on disk (DESIGN.md).
 - Document text: `title + ". " + abstract`, abstract pre-truncated to
   ~400 tokens (whitespace-word approximation; the model tokenizer truncates
   hard at 512 tokens as a backstop).
@@ -13,9 +14,10 @@
 
 Usage:
   .venv/bin/python ingest/embed_qdrant.py --limit 20000     # smoke test
-  .venv/bin/python ingest/embed_qdrant.py                   # full corpus (~1 day on a 3060)
+  .venv/bin/python ingest/embed_qdrant.py                   # full corpus (~5.5h on a 3060 w/ 270m)
   .venv/bin/python ingest/embed_qdrant.py --restart         # ignore checkpoint, recreate collection
-Env: ECS_EMBED_MODEL (fallback model), ECS_EMBED_BATCH (encode batch size).
+Env: ECS_EMBED_MODEL (model override), ECS_EMBED_BATCH (encode batch size),
+     ECS_EMBED_DTYPE (see ecs.embedder — bf16 default on CUDA).
 """
 
 from __future__ import annotations
@@ -124,15 +126,19 @@ def main() -> None:
         enc = tokenizer(texts, truncation=True, max_length=emb.model.max_seq_length)
         n_tokens = sum(len(ids) for ids in enc["input_ids"])
         vecs = emb.embed_docs(texts)
-        client.upsert(
-            collection_name=config.QDRANT_COLLECTION,
-            points=models.Batch(
-                ids=[int(qid[1:]) for qid, _, _ in rows],
-                vectors=vecs.tolist(),
-                payloads=[{"qid": qid, "title": title} for qid, title, _ in rows],
-            ),
-            wait=True,
-        )
+        # upsert in <=1024-point slices: qdrant's HTTP body limit is 32MB and
+        # large --batch values (used for encode efficiency) would exceed it
+        for j in range(0, len(rows), 1024):
+            sl = rows[j : j + 1024]
+            client.upsert(
+                collection_name=config.QDRANT_COLLECTION,
+                points=models.Batch(
+                    ids=[int(qid[1:]) for qid, _, _ in sl],
+                    vectors=vecs[j : j + 1024].tolist(),
+                    payloads=[{"qid": qid, "title": title} for qid, title, _ in sl],
+                ),
+                wait=True,
+            )
         last_qid = rows[-1][0]
         state = {"last_qid": last_qid, "done": state["done"] + len(rows)}
         save_checkpoint(state)
