@@ -301,3 +301,17 @@ def test_verbalize_passes_anchors_info_through():
     assert q == "Which films qualify?"
     sent_prompt = stub.last_kwargs["messages"][0]["content"]
     assert ANCHORS_INFO[0] in sent_prompt
+
+
+def test_chat_retries_empty_completions(monkeypatch):
+    monkeypatch.setattr(vb.time, "sleep", lambda s: None)
+    stub = StubClient([make_response(""), make_response("  "), make_response("ok")])
+    assert vb._chat("p", client=stub) == "ok"
+    assert stub.calls == 3
+
+
+def test_chat_raises_after_persistent_empty(monkeypatch):
+    monkeypatch.setattr(vb.time, "sleep", lambda s: None)
+    stub = StubClient([make_response("")] * 3)
+    with pytest.raises(vb.EmptyCompletion):
+        vb._chat("p", client=stub, max_retries=2)

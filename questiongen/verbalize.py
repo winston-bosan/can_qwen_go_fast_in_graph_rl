@@ -174,7 +174,13 @@ def _status_of(exc: Exception) -> int | None:
     return getattr(exc, "status_code", None)
 
 
+class EmptyCompletion(RuntimeError):
+    """The model returned an empty completion (retryable)."""
+
+
 def _is_retryable(exc: Exception) -> bool:
+    if isinstance(exc, EmptyCompletion):
+        return True
     status = _status_of(exc)
     if status is not None:
         return status in RETRYABLE_STATUS or status >= 500
@@ -190,7 +196,11 @@ def _chat(
     max_retries: int = 4,
     base_delay: float = 2.0,
 ) -> str:
-    """One chat completion with backoff on 429/5xx; tracks usage; returns text."""
+    """One chat completion with backoff on 429/5xx; tracks usage; returns text.
+
+    Empty completions (observed sporadically from reasoning models routed via
+    OpenRouter) are treated as retryable — an empty string is never useful.
+    """
     client = client or _client()
     for attempt in range(max_retries + 1):
         try:
@@ -209,7 +219,10 @@ def _chat(
                 getattr(usage, "completion_tokens", None),
                 getattr(usage, "cost", None),
             )
-            return resp.choices[0].message.content or ""
+            text = resp.choices[0].message.content or ""
+            if not text.strip():
+                raise EmptyCompletion(f"model {model} returned an empty completion")
+            return text
         except Exception as exc:  # openai typed errors; SDK import stays lazy
             if not _is_retryable(exc) or attempt == max_retries:
                 raise

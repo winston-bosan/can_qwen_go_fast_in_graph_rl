@@ -280,7 +280,12 @@ def generate_one(
     scaffold = build_scaffold(pid, rel_label, b_title, len(candidates))
     if use_llm:
         relations = [f"{pid} ({rel_label})"]
-        question = verbalize.verbalize(scaffold, relations, style="direct")
+        try:
+            question = verbalize.verbalize(scaffold, relations, style="direct")
+        except Neo4jUnavailable:
+            raise
+        except Exception as exc:  # one bad LLM reply must not kill the run
+            return None, f"{anchor_qid}: verbalize failed ({type(exc).__name__}: {exc})"
     else:
         question = scaffold
 
