@@ -18,6 +18,13 @@ TI/TO token handling, length scheduling, format reward).
 - **Vector DB**: Qdrant (docker, :6333 HTTP / :6334 gRPC). Collection `wiki_entities`,
   1024-dim, cosine, on-disk vectors + HNSW; payload `{qid, title}` (abstract text looked up
   from a local sqlite/parquet sidecar, NOT stored in Qdrant payload — keeps the index small).
+  NOTE: the 1024-dim collection is tied to harrier-0.6b. harrier-270m is Gemma3-based and
+  emits 640-dim — a 270m index must use a separate collection `wiki_entities_270m` (640-dim).
+- **Entity titles**: the Wikidata5M alias file is UNORDERED — "first alias" is noise.
+  Title rule: pick the longest alias that case-insensitively prefix-matches the entity's
+  abstract opening (abstracts almost always begin with the canonical name); fallback to the
+  first alias, then to the QID. Implemented in the sidecar build; everything downstream
+  (embedding text, search payloads, verbalization) reads titles from the sidecar.
 - **Embedder**: `microsoft/harrier-oss-v1-0.6b` (1024-dim, last-token pooling, L2-normalized).
   Documents embedded raw (title + abstract). Queries embedded with:
   `Instruct: Given a question, retrieve Wikipedia entities relevant to answering it\nQuery: {q}`.
@@ -39,6 +46,10 @@ TI/TO token handling, length scheduling, format reward).
   entity, 0 = other. Ideal DCG computed from the golden set; list truncated at 50;
   malformed output → format penalty. Implementation lives in `eval/metrics.py` and is imported
   by training — single source of truth.
+  MEASURED (eval/tests/test_metrics.py): trailing junk after correct entities costs 0.0 NDCG —
+  two-tier NDCG alone has NO anti-dumping pressure. The *training* reward therefore adds a
+  configurable over-reporting penalty (`w_dump · junk_count/k`, in training/env/reward.py);
+  eval reporting always includes F1 alongside NDCG to expose dumping.
 - **Question generation**, two pipelines, both emitting the same JSONL schema
   `{id, question, answer_qids: [...], bridge_qids: [...], source, cypher?, difficulty}`:
   1. **KG-pattern**: sample 2–4-hop Cypher patterns with filters, execute for exact answer sets,
