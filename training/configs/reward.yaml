@@ -1,0 +1,21 @@
+# Reward configuration for training/env/reward.py.
+# Select at runtime with ECS_REWARD_CONFIG=/path/to/other.yaml (defaults to this file).
+
+# "two_tier": eval.metrics.ndcg_two_tier -- gain 2 for answer-set QIDs, 1 for
+#             bridge/evidence QIDs, 0 otherwise (the DESIGN.md metric).
+# "recall":   plain answer-set recall@k (ablation / sanity baseline).
+metric: two_tier
+k: 50
+
+# SID-1-style format reward: added when the final message contains a
+# well-formed ```entities block. Unparseable output zeroes the WHOLE reward
+# (hard 0), so the format signal is (a) +0.1 bonus, (b) all-or-nothing gate.
+format_bonus: 0.1
+
+# Mild length penalty knob -- DEFAULT OFF. SID-1 controls response length via
+# max-token scheduling (see configs/*.yaml + launch/run_*.sh stages), not the
+# reward. Turn on only for ablations; keep coef small so it never dominates NDCG.
+length_penalty:
+  enabled: false
+  coef: 0.0001        # reward -= coef * max(0, response_tokens - target_tokens)
+  target_tokens: 3072

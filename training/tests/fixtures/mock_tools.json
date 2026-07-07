@@ -1,0 +1,34 @@
+{
+  "_comment": "Canned tool-server responses for rollout_smoke.py --mock-tools and tests. Lists are consumed round-robin per tool (last element repeats). Scenario matches rollout_smoke.SAMPLE_QUESTION: Hitchhiker's Guide -> Douglas Adams (Q42) -[P69 educated at]-> St John's College, Cambridge (Q691283).",
+  "vector_search": [
+    [
+      {"qid": "Q42", "title": "Douglas Adams", "score": 0.91, "snippet": "Douglas Noel Adams was an English author, best known for The Hitchhiker's Guide to the Galaxy."},
+      {"qid": "Q25169", "title": "The Hitchhiker's Guide to the Galaxy", "score": 0.87, "snippet": "Comedy science-fiction franchise created by Douglas Adams."},
+      {"qid": "Q35794", "title": "University of Cambridge", "score": 0.41, "snippet": "Collegiate research university in Cambridge, England."}
+    ],
+    [
+      {"qid": "Q691283", "title": "St John's College, Cambridge", "score": 0.78, "snippet": "Constituent college of the University of Cambridge, founded 1511."},
+      {"qid": "Q35794", "title": "University of Cambridge", "score": 0.66, "snippet": "Collegiate research university in Cambridge, England."}
+    ]
+  ],
+  "get_entity": [
+    {"qid": "Q42", "title": "Douglas Adams", "abstract": "Douglas Noel Adams (1952-2001) was an English author and screenwriter, best known as the creator of The Hitchhiker's Guide to the Galaxy. He was educated at St John's College, Cambridge.", "aliases": ["Douglas Noel Adams", "Douglas N. Adams"], "degree_in": 18, "degree_out": 27},
+    {"qid": "Q691283", "title": "St John's College, Cambridge", "abstract": "St John's College is a constituent college of the University of Cambridge, founded in 1511.", "aliases": ["St John's", "Saint John's College"], "degree_in": 240, "degree_out": 12}
+  ],
+  "get_neighbors": [
+    {"total": 3, "edges": [
+      {"src": "Q42", "rel": "P69", "rel_label": "educated at", "dst": "Q691283", "dst_title": "St John's College, Cambridge"},
+      {"src": "Q42", "rel": "P106", "rel_label": "occupation", "dst": "Q36180", "dst_title": "writer"},
+      {"src": "Q42", "rel": "P800", "rel_label": "notable work", "dst": "Q25169", "dst_title": "The Hitchhiker's Guide to the Galaxy"}
+    ]},
+    {"total": 2, "edges": [
+      {"src": "Q691283", "rel": "P361", "rel_label": "part of", "dst": "Q35794", "dst_title": "University of Cambridge"},
+      {"src": "Q691283", "rel": "P17", "rel_label": "country", "dst": "Q145", "dst_title": "United Kingdom"}
+    ]}
+  ],
+  "find_paths": {
+    "paths": [
+      [{"src": "Q42", "rel": "P69", "rel_label": "educated at", "dst": "Q691283", "dst_title": "St John's College, Cambridge"}]
+    ]
+  }
+}
