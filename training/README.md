@@ -38,22 +38,27 @@ blocker (e.g. sglang multi-turn instability at 16k context).
 env/tools.py        adapter: 4 toolserver endpoints -> trainer tool interface
                     (async httpx, timeout, retry-once, errors returned as strings)
 env/reward.py       terminal reward: two-tier NDCG (eval/metrics.py) + format
-                    bonus + optional length penalty; verl compute_score entry
+                    bonus - dump penalty - optional length penalty
 data.py             data/questions/*.jsonl -> verl parquet; hash split; curriculum
 configs/
   validate_0p6b.yaml  Qwen3-0.6B, group 8, batch 32, 8k ctx, 1-2 GPUs
   main_4b.yaml        Qwen3-4B, group 16, batch 64, 16k ctx, 8xH100 (B300 notes inside)
   tools_ecs.yaml      verl tool registry (schemas mirror toolserver/schema.py)
-  reward.yaml         two_tier vs recall, format bonus, length-penalty knob
+  reward.yaml         two_tier vs recall, format bonus, w_dump, length penalty
 rollout_smoke.py    trainer-free end-to-end check (HF model + real tool loop + reward)
-launch/             setup_remote.sh, run_validate.sh, run_main.sh, common.sh
+launch/
+  setup_remote.sh          generic GPU box: venv + verl[sglang]==0.8.0 + dataset
+  setup_runpod.sh          RunPod pod: native qdrant/neo4j/toolserver (no docker!)
+  make_data_tarball.sh     run LOCALLY: data_bundle.tar.zst + manifest + checksums
+  loadtest_toolserver.py   verify toolserver QPS on the pod before training
+  run_validate.sh / run_main.sh / common.sh   staged-length GRPO launches
 tests/              pytest suite; reference_metrics.py is a TEST-ONLY NDCG mirror
 ```
 
 ## Quickstart (local, no GPU rental)
 
 ```bash
-pytest training/tests -q                          # 38 tests
+pytest training/tests -q                          # 45 tests
 python -m training.rollout_smoke --mock-tools     # no tool server needed
 python -m training.rollout_smoke                  # against live :7801
 python -m training.data                           # data/questions/*.jsonl -> data/rl/*.parquet
@@ -121,14 +126,18 @@ LENGTH_SCHEDULE="4096:60 8192:140 12288" ./training/launch/run_main.sh
 ```
 [training box: 8xH100 or B300]
   verl (sglang rollout + FSDP actor)
-  toolserver :7801  <- uvicorn toolserver.app:app
-  neo4j + qdrant    <- docker compose up -d   (rsync data/neo4j, data/qdrant)
+  toolserver :7801  <- uvicorn toolserver.app:app --workers 4
+  neo4j + qdrant    <- NATIVE binaries via setup_runpod.sh (RunPod pods are
+                       containers; docker-in-docker is NOT available, so
+                       docker-compose cannot run inside a pod)
   embedder (harrier-0.6b) shares a GPU with rollout or runs on CPU
 ```
 
-Sync: `rsync -av --exclude .venv data/neo4j data/qdrant data/questions box:.../data/`
-(~30–40GB: qdrant 4.8M×1024-dim on-disk vectors ≈ 20GB + HNSW, neo4j ≈ 5–10GB).
-Then `training/launch/setup_remote.sh` (idempotent), edit `training/launch/env.sh`.
+Sync: ship `data_bundle.tar.zst` from `training/launch/make_data_tarball.sh`
+(~30–40GB: qdrant 4.8M×1024-dim on-disk vectors ≈ 20GB + HNSW, neo4j ≈ 4–10GB,
+sidecar.db ≈ 5GB). Full RunPod walkthrough in the next section; a generic
+(non-RunPod) box with working docker can instead use docker-compose +
+`training/launch/setup_remote.sh`.
 
 **Fallback: tunnel to this dev box** (`ssh -R 7801:localhost:7801 box`,
 `ECS_TOOLSERVER_URL=http://localhost:7801`). Do the math before choosing this:
@@ -143,6 +152,101 @@ Then `training/launch/setup_remote.sh` (idempotent), edit `training/launch/env.s
   dominating step time. Bandwidth is irrelevant (6k × ~4KB ≈ 25MB/step).
 - Tunnel flaps surface as `ERROR:` tool outputs → reward noise. Colocate for the
   main run; the tunnel is acceptable for short validation runs only.
+
+## RunPod deployment
+
+### Recommended pod spec
+
+| item | validation (0.6B) | main (4B) |
+|---|---|---|
+| GPU | 1× H100 80GB / A100 80GB (or 1× B300) | 8× H100 SXM **or** 1× B300 288GB |
+| Image | `runpod/pytorch:2.8.0-py3.11-cuda12.8.1-cudnn-devel-ubuntu22.04` | same |
+| Volume (`/workspace`) | ≥ 150GB | ≥ 250GB |
+| Container disk | ≥ 50GB | ≥ 50GB |
+| Ports | TCP 22 (SSH) only — all ECS services bind 127.0.0.1 | same |
+
+- **Image rationale**: a `-devel` image is required (nvcc for the best-effort
+  flash-attn build); CUDA toolkit 12.8.1 matches the cu128 wheels of
+  torch 2.9.1 that `verl[sglang]==0.8.0` pins. The image's preinstalled
+  torch 2.8 is *never used* — `setup_remote.sh` builds its own venv. Do not
+  pip-install into the system python (the RunPod 2.8 template has a known
+  torch-fallback packaging bug, runpod/containers#114; our venv sidesteps it).
+- **Disk math**: data bundle ~25GB compressed + ~35GB expanded, HF weights
+  (0.6B ≈ 1.5GB, 4B ≈ 8GB), FSDP checkpoints (4B: ~30GB per save incl.
+  optimizer state — keep `save_freq` modest), wandb/logs. Put repo, venv and
+  data on the `/workspace` volume: RunPod wipes the container layer on
+  restart but keeps the volume, and `setup_runpod.sh` is idempotent on top.
+- **Env vars**: none needed at provision time; all `ECS_*` default to
+  localhost. `WANDB_API_KEY` goes into `training/launch/env.sh` after setup.
+
+### Exact sequence
+
+```bash
+# 0. LOCAL box, AFTER the embedding run completes (script refuses otherwise):
+docker compose stop qdrant neo4j            # cold copy required
+training/launch/make_data_tarball.sh        # -> data/data_bundle.tar.zst
+docker compose start qdrant neo4j
+rsync -avP data/data_bundle.tar.zst root@<pod>:/workspace/
+
+# 1. POD: get the repo (volume-persistent path)
+cd /workspace && git clone <repo-url> entity_component_search
+cd entity_component_search
+
+# 2. services (native qdrant+neo4j+toolserver) + data restore + training venv
+training/launch/setup_runpod.sh --restore /workspace/data_bundle.tar.zst
+#   add --import-csv to rebuild neo4j from CSVs instead of the binary store
+#   (use when neo4j versions diverge from 5.26.x; qdrant must stay 1.18.x)
+
+# 3. health checks (also printed at the end of setup_runpod.sh)
+training/launch/setup_runpod.sh --status     # ports + scripts/status.py counts
+
+# 4. verify toolserver throughput BEFORE burning GPU-hours
+.venv-train/bin/python training/launch/loadtest_toolserver.py --duration 30 --concurrency 64
+
+# 5. end-to-end env check against the LIVE stack, then train
+.venv-train/bin/python -m training.rollout_smoke
+training/launch/run_validate.sh              # then: run_main.sh
+```
+
+### CUDA / version landmines (checked 2026-07)
+
+1. **torch pin**: `verl[sglang]==0.8.0` pins `torch==2.9.1`; the default PyPI
+   wheel is **cu128** → NVIDIA driver ≥ 550 on the host. Check `nvidia-smi`
+   right after provisioning; RunPod lets you filter hosts by CUDA version —
+   pick 12.8+.
+2. **B300 = Blackwell Ultra (sm_103)**: needs cu128+ kernels end-to-end.
+   torch 2.9.1 cu128 ships Blackwell (sm_100/sm_120) kernels and runs sm_103
+   via PTX forward-compat; if you see "no kernel image" errors, reinstall with
+   `pip install torch==2.9.1 --index-url https://download.pytorch.org/whl/cu130`
+   (still satisfies verl's `==2.9.1` pin). sglang's `sgl-kernel` (pinned by
+   verl's sglang extra) has Blackwell builds; verify with a 1-prompt
+   `sglang.launch_server` before training. flash-attn may fail to compile for
+   sm_103 — it is best-effort in `setup_remote.sh` and training runs without it.
+3. **No docker-in-docker on GPU pods** — hence `setup_runpod.sh` runs qdrant
+   (standalone binary), neo4j (tarball + headless JDK 21, Java 17 fallback)
+   and the toolserver natively under `setsid`/pidfiles
+   (`.services/run/*.{pid,log}`).
+4. **Binary-restore version pins**: qdrant storage dir needs qdrant **1.18.x**
+   on the pod (dev box runs 1.18.2; `QDRANT_VERSION` env) — there is no
+   re-import route for qdrant short of re-embedding, so always match. neo4j
+   store needs **5.26.x** (`NEO4J_VERSION` env); on any skew use
+   `--import-csv` (entities.csv/triples.csv travel in the bundle; ~10–20 min
+   for 21M edges + index build, same command as `ingest/load_neo4j.py`).
+5. **Toolserver VRAM**: each uvicorn worker (default `TOOLSERVER_WORKERS=4`)
+   lazily loads its own harrier-0.6b embedder ≈ 1.5GB VRAM → ~6GB total. On
+   the 8×H100 pod set `TOOLSERVER_CUDA_VISIBLE_DEVICES=0` so the embedders sit
+   in GPU0's sglang headroom (`gpu_memory_utilization: 0.55` leaves ~35GB); on
+   a single B300 the default is fine. Do **not** switch to the harrier-270m
+   fallback on the pod — the qdrant index was embedded with the 0.6b model.
+
+### Recommendations for workstream A (toolserver — not edited here)
+
+- An `ECS_EMBED_DEVICE` env knob (cuda:N / cpu) for the embedder would replace
+  the `CUDA_VISIBLE_DEVICES` workaround above.
+- A single shared embedder process (or micro-batching queue across uvicorn
+  workers) would cut embedder VRAM from workers× to 1× and raise
+  vector_search QPS; today's per-worker lazy load is why `setup_runpod.sh`
+  fires warmup requests.
 
 ## Sizing & token budgets
 
