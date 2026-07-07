@@ -16,19 +16,23 @@ TI/TO token handling, length scheduling, format reward).
   Nodes `(:Entity {qid, title})`, relationships typed by P-id (e.g. `[:P69]`) with `label` property
   holding the English relation name. Bulk load via `neo4j-admin database import full` from CSVs.
 - **Vector DB**: Qdrant (docker, :6333 HTTP / :6334 gRPC). Collection `wiki_entities`,
-  1024-dim, cosine, on-disk vectors + HNSW; payload `{qid, title}` (abstract text looked up
-  from a local sqlite/parquet sidecar, NOT stored in Qdrant payload — keeps the index small).
-  NOTE: the 1024-dim collection is tied to harrier-0.6b. harrier-270m is Gemma3-based and
-  emits 640-dim — a 270m index must use a separate collection `wiki_entities_270m` (640-dim).
+  **640-dim** (harrier-270m), cosine, on-disk vectors + HNSW; payload `{qid, title}` (abstract
+  text looked up from a local sqlite/parquet sidecar, NOT stored in Qdrant payload).
+  DECISION 2026-07-07 (user): canonical embedder is **harrier-oss-v1-270m** (640-dim,
+  Gemma3-based, 189.7 ent/s on the 3060 → ~7.2h full corpus) — chosen over 0.6b (1024-dim,
+  59.7 ent/s shared, ~21h) to unblock sim_link prototyping. The 0.6b index (1024-dim) is the
+  quality-upgrade path and requires a full re-embed; docs and queries MUST use the same model.
 - **Entity titles**: the Wikidata5M alias file is UNORDERED — "first alias" is noise.
   Title rule: pick the longest alias that case-insensitively prefix-matches the entity's
   abstract opening (abstracts almost always begin with the canonical name); fallback to the
   first alias, then to the QID. Implemented in the sidecar build; everything downstream
   (embedding text, search payloads, verbalization) reads titles from the sidecar.
-- **Embedder**: `microsoft/harrier-oss-v1-0.6b` (1024-dim, last-token pooling, L2-normalized).
-  Documents embedded raw (title + abstract). Queries embedded with:
+- **Embedder**: `microsoft/harrier-oss-v1-270m` (640-dim, last-token pooling, L2-normalized;
+  see vector-DB bullet for the decision record). Documents embedded raw (title + abstract).
+  Queries embedded with:
   `Instruct: Given a question, retrieve Wikipedia entities relevant to answering it\nQuery: {q}`.
-  `microsoft/harrier-oss-v1-270m` is the local/validation fallback (same interface).
+  `microsoft/harrier-oss-v1-0.6b` (1024-dim) is the quality-upgrade path via ECS_EMBED_MODEL
+  plus a full re-embed.
 - **Tool server**: FastAPI on :7801, JSON. Endpoints (also exposed as an OpenAI-style tool schema
   in `toolserver/schema.py`):
   - `POST /vector_search {query, k<=50}` → `[{qid, title, score, snippet}]`

@@ -20,10 +20,10 @@ NEO4J_AUTH = (
 
 QDRANT_URL = os.environ.get("ECS_QDRANT_URL", "http://localhost:6333")
 QDRANT_COLLECTION = "wiki_entities"
-EMBED_DIM = 1024
+EMBED_DIM = 640
 
-EMBED_MODEL = os.environ.get("ECS_EMBED_MODEL", "microsoft/harrier-oss-v1-0.6b")
-EMBED_MODEL_SMALL = "microsoft/harrier-oss-v1-270m"
+EMBED_MODEL = os.environ.get("ECS_EMBED_MODEL", "microsoft/harrier-oss-v1-270m")
+EMBED_MODEL_LARGE = "microsoft/harrier-oss-v1-0.6b"  # 1024-dim; requires re-embedding the collection
 QUERY_INSTRUCTION = (
     "Given a question, retrieve Wikipedia entities relevant to answering it"
 )
