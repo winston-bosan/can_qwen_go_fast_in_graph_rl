@@ -49,7 +49,7 @@ NEO4J_VERSION="${NEO4J_VERSION:-5.26.0}"        # any 5.26.x; match dev box mino
 NEO4J_PASSWORD="${ECS_NEO4J_PASSWORD:-ecs-local-dev}"
 NEO4J_HEAP="${NEO4J_HEAP:-8G}"
 NEO4J_PAGECACHE="${NEO4J_PAGECACHE:-8G}"
-TOOLSERVER_WORKERS="${TOOLSERVER_WORKERS:-4}"   # each worker lazily loads its own embedder (~1.5GB VRAM)
+TOOLSERVER_WORKERS="${TOOLSERVER_WORKERS:-4}"   # each worker lazily loads its own embedder (harrier-270m, ~0.7GB VRAM)
 TOOLSERVER_CUDA="${TOOLSERVER_CUDA_VISIBLE_DEVICES-}"  # e.g. "0" to pin embedders to GPU0 on multi-GPU pods
 
 mkdir -p "$RUN_DIR" "$DATA_DIR"

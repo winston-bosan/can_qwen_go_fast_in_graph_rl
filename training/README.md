@@ -130,11 +130,11 @@ LENGTH_SCHEDULE="4096:60 8192:140 12288" ./training/launch/run_main.sh
   neo4j + qdrant    <- NATIVE binaries via setup_runpod.sh (RunPod pods are
                        containers; docker-in-docker is NOT available, so
                        docker-compose cannot run inside a pod)
-  embedder (harrier-0.6b) shares a GPU with rollout or runs on CPU
+  embedder (harrier-270m, 640-dim) shares a GPU with rollout or runs on CPU
 ```
 
 Sync: ship `data_bundle.tar.zst` from `training/launch/make_data_tarball.sh`
-(~30–40GB: qdrant 4.8M×1024-dim on-disk vectors ≈ 20GB + HNSW, neo4j ≈ 4–10GB,
+(~20–30GB: qdrant 4.8M×640-dim on-disk vectors ≈ 12GB + HNSW, neo4j ≈ 4–10GB,
 sidecar.db ≈ 5GB). Full RunPod walkthrough in the next section; a generic
 (non-RunPod) box with working docker can instead use docker-compose +
 `training/launch/setup_remote.sh`.
@@ -147,8 +147,8 @@ sidecar.db ≈ 5GB). Full RunPod walkthrough in the next section; a generic
 - Latency: calls within one trajectory are *serial* → ~6 × (100–150ms tunnel RTT
   + server time) ≈ +1s wall per trajectory; trajectories run concurrently, so
   RTT alone costs only ~1–2s/step. **The real risk is dev-box throughput**: the
-  3060-backed `vector_search` (harrier embed) sustains ~20–30 QPS, so 6k
-  calls/step ≈ **3–5 min/step added**, serialized behind one tunnel — likely
+  3060-backed `vector_search` (harrier-270m embed) sustains ~30–60 QPS, so 6k
+  calls/step ≈ **2–4 min/step added**, serialized behind one tunnel — likely
   dominating step time. Bandwidth is irrelevant (6k × ~4KB ≈ 25MB/step).
 - Tunnel flaps surface as `ERROR:` tool outputs → reward noise. Colocate for the
   main run; the tunnel is acceptable for short validation runs only.
@@ -171,8 +171,8 @@ sidecar.db ≈ 5GB). Full RunPod walkthrough in the next section; a generic
   torch 2.8 is *never used* — `setup_remote.sh` builds its own venv. Do not
   pip-install into the system python (the RunPod 2.8 template has a known
   torch-fallback packaging bug, runpod/containers#114; our venv sidesteps it).
-- **Disk math**: data bundle ~25GB compressed + ~35GB expanded, HF weights
-  (0.6B ≈ 1.5GB, 4B ≈ 8GB), FSDP checkpoints (4B: ~30GB per save incl.
+- **Disk math**: data bundle ~15–20GB compressed + ~25GB expanded (640-dim
+  index), HF weights (0.6B ≈ 1.5GB, 4B ≈ 8GB), FSDP checkpoints (4B: ~30GB per save incl.
   optimizer state — keep `save_freq` modest), wandb/logs. Put repo, venv and
   data on the `/workspace` volume: RunPod wipes the container layer on
   restart but keeps the volume, and `setup_runpod.sh` is idempotent on top.
@@ -233,11 +233,16 @@ training/launch/run_validate.sh              # then: run_main.sh
    `--import-csv` (entities.csv/triples.csv travel in the bundle; ~10–20 min
    for 21M edges + index build, same command as `ingest/load_neo4j.py`).
 5. **Toolserver VRAM**: each uvicorn worker (default `TOOLSERVER_WORKERS=4`)
-   lazily loads its own harrier-0.6b embedder ≈ 1.5GB VRAM → ~6GB total. On
+   lazily loads its own harrier-270m embedder ≈ 0.7GB VRAM → ~3GB total. On
    the 8×H100 pod set `TOOLSERVER_CUDA_VISIBLE_DEVICES=0` so the embedders sit
    in GPU0's sglang headroom (`gpu_memory_utilization: 0.55` leaves ~35GB); on
-   a single B300 the default is fine. Do **not** switch to the harrier-270m
-   fallback on the pod — the qdrant index was embedded with the 0.6b model.
+   a single B300 the default is fine.
+6. **Embedder/index coupling**: the qdrant index and the query path are both
+   harrier-**270m / 640-dim** (canonical since DESIGN.md 2026-07-07, commit
+   b82cce7; `src/ecs/config.py` is the source of truth). Never mix embedder
+   models between documents and queries. harrier-0.6b (1024-dim) is the
+   quality-**upgrade path** and requires a full re-embed of the collection
+   (new index dimension) — plan a fresh data bundle if taken.
 
 ### Recommendations for workstream A (toolserver — not edited here)
 
