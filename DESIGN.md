@@ -55,6 +55,10 @@ TI/TO token handling, length scheduling, format reward).
   1. **KG-pattern**: sample 2–4-hop Cypher patterns with filters, execute for exact answer sets,
      LLM-verbalize, round-trip check (LLM judges question↔pattern faithfulness), drop answer
      sets that are empty or >30.
+     Generation/judge LLM: **deepseek/deepseek-v4-pro via OpenRouter** (OpenAI-compatible API,
+     base_url https://openrouter.ai/api/v1, key `OPENROUTER_API_KEY` from repo-root `.env`,
+     which is gitignored). Model overridable via `ECS_QGEN_MODEL`. The anthropic SDK path is
+     retired for generation; frontier baselines also route through OpenRouter.
   2. **Similarity-link** (SID-style): chain entities via abstract-embedding similarity so ≥1 hop
      is text-only (not a triple), forcing hybrid vector+graph trajectories.
 - **Eval**: FRAMES (google/frames-benchmark) mapped to golden entity sets via its linked wiki

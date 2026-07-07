@@ -5,6 +5,13 @@ Values mirror DESIGN.md; override via environment variables for remote/training 
 
 import os
 
+try:  # repo-root .env holds OPENROUTER_API_KEY; absent in some deploy contexts
+    from dotenv import load_dotenv
+
+    load_dotenv(os.path.join(os.path.dirname(__file__), "..", "..", ".env"))
+except ImportError:
+    pass
+
 NEO4J_URI = os.environ.get("ECS_NEO4J_URI", "bolt://localhost:7687")
 NEO4J_AUTH = (
     os.environ.get("ECS_NEO4J_USER", "neo4j"),
@@ -22,6 +29,9 @@ QUERY_INSTRUCTION = (
 )
 
 TOOLSERVER_URL = os.environ.get("ECS_TOOLSERVER_URL", "http://localhost:7801")
+
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+QGEN_MODEL = os.environ.get("ECS_QGEN_MODEL", "deepseek/deepseek-v4-pro")
 
 DATA_DIR = os.environ.get(
     "ECS_DATA_DIR",

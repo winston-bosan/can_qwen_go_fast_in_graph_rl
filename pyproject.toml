@@ -15,7 +15,8 @@ dependencies = [
     "pydantic>=2.9",
     "orjson>=3.10",
     "tqdm>=4.66",
-    "anthropic>=0.40",
+    "openai>=1.55",
+    "python-dotenv>=1.0",
     "pandas>=2.2",
     "pyarrow>=17",
 ]
