@@ -49,7 +49,12 @@ class Embedder:
             self.model_name, device=device, trust_remote_code=True, **kwargs
         )
         self.model.max_seq_length = max_seq_length
-        self.dim = self.model.get_sentence_embedding_dimension()
+        get_dim = getattr(
+            self.model,
+            "get_embedding_dimension",  # sentence-transformers >= 5.x
+            self.model.get_sentence_embedding_dimension,
+        )
+        self.dim = get_dim()
 
     def embed_docs(self, texts: list[str], show_progress: bool = False) -> np.ndarray:
         """Embed documents raw (no instruction prefix). Returns (n, dim) float32."""
