@@ -43,7 +43,7 @@ from .kg_patterns import REL_LABELS, Neo4jUnavailable, neo4j_available, run_cyph
 from .schema import QuestionRecord, append_records
 
 DEFAULT_OUT = os.path.join(config.DATA_DIR, "questions", "sim_link.jsonl")
-NEIGHBOR_K = 25  # semantic neighbors to consider per anchor
+NEIGHBOR_K = 50  # semantic neighbors to consider per anchor
 MAX_ANSWERS = 10  # cap the text-linked answer set
 MIN_TITLE_LEN = 4  # avoid spurious mentions of very short titles
 
