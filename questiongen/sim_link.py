@@ -173,7 +173,9 @@ def _qdrant():
     if _client is None:
         from qdrant_client import QdrantClient  # lazy import
 
-        _client = QdrantClient(url=config.QDRANT_URL, timeout=10)
+        # generous timeout: the collection may be under heavy write load
+        # (re-embedding ingestion) while we read from it
+        _client = QdrantClient(url=config.QDRANT_URL, timeout=30)
     return _client
 
 
@@ -343,13 +345,23 @@ def main(argv: list[str] | None = None) -> int:
     max_attempts = args.max_attempts or max(10 * args.n, 20)
     records: list[QuestionRecord] = []
     attempts = 0
+    consecutive_errors = 0
     while len(records) < args.n and attempts < max_attempts:
         attempts += 1
         try:
             record, status = generate_one(rng, side, use_llm)
-        except Neo4jUnavailable as exc:
-            print(f"SKIP: {exc}")
-            return 0
+            consecutive_errors = 0
+        except Exception as exc:
+            # transient service hiccups (qdrant under re-embed write load,
+            # neo4j blips) must not kill the run — but a truly-down service
+            # should not spin forever either
+            record = None
+            status = f"attempt error ({type(exc).__name__}: {exc})"
+            consecutive_errors += 1
+            if consecutive_errors >= 10:
+                print(f"[{attempts}] {status}")
+                print("SKIP: 10 consecutive attempt errors — a service looks down.")
+                break
         print(f"[{attempts}] {status}")
         if record is not None:
             records.append(record)
