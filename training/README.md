@@ -41,10 +41,12 @@ env/reward.py       terminal reward: two-tier NDCG (eval/metrics.py) + format
                     bonus - dump penalty - optional length penalty
 data.py             data/questions/*.jsonl -> verl parquet; hash split; curriculum
 configs/
-  validate_0p6b.yaml  Qwen3-0.6B, group 8, batch 32, 8k ctx, 1-2 GPUs
+  validate_0p6b.yaml  Qwen3-0.6B, group 8, batch 32, 8k ctx, 1-2 GPUs (PRIMARY)
+  validate_0p8b.yaml  Qwen3.5-0.8B variant -- PREPARED, NOT CLEARED (see below)
   main_4b.yaml        Qwen3-4B, group 16, batch 64, 16k ctx, 8xH100 (B300 notes inside)
   tools_ecs.yaml      verl tool registry (schemas mirror toolserver/schema.py)
   reward.yaml         two_tier vs recall, format bonus, w_dump, length penalty
+ALTERNATIVES.md     assessment: Unsloth+ART LoRA validation path on the local 3060
 rollout_smoke.py    trainer-free end-to-end check (HF model + real tool loop + reward)
 launch/
   setup_remote.sh          generic GPU box: venv + verl[sglang]==0.8.0 + dataset
@@ -95,6 +97,78 @@ built-in sample question.
 - length penalty knob (`length_penalty.enabled`, default **off**) —
   `coef * max(0, response_tokens - target)`; SID-1 controls length via token
   scheduling instead, keep this off unless ablating
+
+## Qwen3.5 option (prepared, NOT cleared — 0.6B stays primary)
+
+`configs/validate_0p8b.yaml` preps a switch of the validation policy to
+**Qwen/Qwen3.5-0.8B** (March 2026: 24 layers, 256K context, agentic-tuned,
+thinking + non-thinking). **Compat verdict (checked 2026-07-07): not clean
+under verl 0.8 + sglang today** — run a 1-step pod smoke before committing to
+it. Findings:
+
+1. **Tool-call format (the blocker)**: Qwen3.5 does *not* emit hermes-style
+   `<tool_call>{json}</tool_call>`; official vLLM/SGLang serving guidance is
+   `--tool-call-parser qwen3_coder` (the XML-ish `<function=...>` format).
+   verl 0.8's `multi_turn.format` defaults to `hermes` and its docs list
+   "hermes, llama3_json, ..." — whether `format: qwen3_coder` passes through
+   to sglang's FunctionCallParser inside the *rollout* is **unverified**.
+   Worse, upstream reports the family's tool-call emission is unstable without
+   `tool_choice` forcing (verl#6223), which an RL rollout cannot apply. The
+   0p8b config sets `format: qwen3_coder`; if verl rejects it, the model is
+   blocked (do NOT fall back to hermes — it would silently strip tool calls
+   and train on broken trajectories).
+2. **Thinking default**: Qwen3.5 thinks *by default* (Qwen3-0.6B in our smoke
+   was templated with `enable_thinking=False` explicitly). Decision: train
+   **non-thinking** for rollout-length control — thinking tokens would consume
+   the SID-1 length-scheduled response budget. Enforced via
+   `data.apply_chat_template_kwargs.enable_thinking: false` in the config
+   (same kwarg the smoke test uses).
+3. **Stack versions**: checkpoints ship the multimodal-flavored
+   `Qwen3_5ForConditionalGeneration` class → needs a transformers version with
+   the Qwen3.5 arch (was git-main at release), and sglang with Qwen3.5 support
+   (verl 0.8.0 pins `sglang==0.5.12`; sglang documents Qwen3.5 but the pinned
+   version is unverified). Known open issues for Qwen3.5 *RL training*:
+   verl#6549 (CUDA illegal memory access in `torch_chunk_gated_delta_rule`,
+   vLLM+FSDP2, 9B/27B) and vllm#36275 (no text-only class → weight-name
+   mismatch in colocated GRPO). verl 0.8 release notes claim Qwen3.5 support
+   for **Megatron and VeOmni only** — our path (FSDP + sglang) is not on that
+   list. The 0.8B dense tier may dodge the GDN-kernel issues (reports conflict
+   on whether small tiers carry linear-attention layers), but that is exactly
+   what the pod smoke must prove.
+
+**Clearance procedure** (cheap, ~30 min on the validation pod): bare
+`sglang.launch_server --model-path Qwen/Qwen3.5-0.8B --tool-call-parser
+qwen3_coder` + one tool-call request; then
+`CONFIG_NAME=validate_0p8b trainer.total_training_steps=1 run_validate.sh` and
+check (a) no config rejection on `format`, (b) rollout log shows parsed tool
+calls, (c) `tokenization_sanity_check_mode: strict` stays quiet. Until then:
+**Qwen3-0.6B primary**.
+
+### Qwen3.5-4B for the MAIN run? (finding only — decision is the user's)
+
+Qwen3.5 ships a 4B tier (`Qwen/Qwen3.5-4B`, plus 2B/9B siblings; the
+0.8B–27B tiers are dense, MoE starts at 35B-A3B).
+
+**Pro**: newer post-training with explicit agentic/tool-use tuning (that is our
+exact task shape); 256K native context (Qwen3-4B needs YaRN past 32K — moot at
+our 16k, but headroom is free); family consistency with a 0.8B validation run
+(same template, parser, and gotchas validated once); likely better zero-shot
+tool-calling from step 0, which matters for GRPO-without-SFT where early
+reward signal comes from format-lucky rollouts.
+
+**Con**: every blocker above, amplified by a longer run (tool-parser
+pass-through unverified in verl's FSDP+sglang path; open illegal-memory and
+weight-name issues filed specifically against Qwen3.5 RL training; thinking
+default needs template-kwarg hygiene everywhere); recommended serving sampling
+(`presence_penalty=2.0`) diverges from GRPO-neutral sampling — unclear how the
+model behaves at plain temp=1.0 over 9-turn trajectories; far less community
+RL precedent (mid-2026 RL papers still overwhelmingly train Qwen3/Qwen2.5);
+switching mid-project re-baselines everything (0.6B validation results stop
+predicting 4B main-run behavior across a family boundary).
+
+**Suggested path**: keep `main_4b.yaml` on Qwen3-4B; if the 0.8B clearance
+smoke passes cleanly AND the Qwen3.5-0.8B validation run beats the Qwen3-0.6B
+run on val NDCG at equal steps, clone `main_4b.yaml` for Qwen3.5-4B then.
 
 ## SID-1 gotchas → where they are handled
 
@@ -260,6 +334,28 @@ training/launch/run_validate.sh              # then: run_main.sh
 prompt+schemas, ~6 tool exchanges, short final) → ≈ **1.0–1.3M tokens/step
 processed, ~0.2–0.3M policy-generated**. Trivial for one H100; fits a single
 24GB card with `gpu_memory_utilization≈0.4` and micro-batch 2.
+
+### Validation pod tiers (0.6B/0.8B full-FT, colocated sglang+FSDP, ~250 steps)
+
+Trainer-state math for **0.8B full-FT with Adam** (FSDP mixed precision):
+bf16 params 1.6GB + fp32 master copy 3.2GB + fp32 Adam m/v 6.4GB + bf16 grads
+1.6GB = **12.8GB ≈ 13GB** — the quoted ~13GB is correct (fp32 grad-reduce
+variant: ~14.4GB; Qwen3-0.6B: ~9.6GB, same shape ×0.75). On top of that:
+activations with gradient checkpointing at 8k ctx ≈ 1–2GB per micro-batch
+sequence, sglang engine = `gpu_memory_utilization × VRAM`, plus ~2–3GB
+CUDA/NCCL overhead.
+
+| tier | fit | settings (ECS_EXTRA_OVERRIDES) |
+|---|---|---|
+| **minimum: 1× 48GB** (L40S / RTX 6000 Ada; 16 vCPU / 64GB RAM / 150GB volume) | 13GB trainer + ~19GB sglang @ 0.40 + ~4GB activations + overhead ≈ **40–43GB — fits, tight** | `trainer.n_gpus_per_node=1 actor_rollout_ref.rollout.gpu_memory_utilization=0.40 actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=2` |
+| **sweet spot: 1× 80GB** (H100/A100) | config defaults as-is; headroom for KV at 9-turn trajectories and no accum-step inflation | none (optionally `gpu_memory_utilization=0.55`, micro-batch 8) |
+
+Notes for the 48GB tier: rollout decode is the bottleneck (~2× slower steps vs
+80GB from the smaller KV pool); keep `TOOLSERVER_CUDA_VISIBLE_DEVICES=0` (the
+270m embedders' ~3GB share the same card — budgeted in the overhead above);
+if OOM appears at the 6144-response stage, `actor.fsdp_config.optimizer_offload=true`
+buys ~6.4GB for ~15% step-time cost. 16 vCPU / 64GB RAM is comfortably enough
+(neo4j 8G heap + 8G pagecache + qdrant + toolserver workers ≈ 24GB RSS).
 
 **main_4b (8xH100):** 1024 trajectories/step (64×16), ceiling 16k →
 **≈16.8M tokens/step ceiling**; typical ≈ 6–8k/traj → **6–8M tokens/step

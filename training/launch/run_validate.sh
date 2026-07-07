@@ -11,5 +11,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
 # Two short stages are enough to *validate* length scheduling mechanics on the
 # small model: 2048-cap for the first 30 steps, then the full 6144 budget.
+# CONFIG_NAME=validate_0p8b switches to the (experimental, not yet cleared)
+# Qwen3.5-0.8B config -- see its header + README before using.
 SCHEDULE=(${LENGTH_SCHEDULE:-"2048:30" "6144"})
-run_stages validate_0p6b "${SCHEDULE[@]}"
+run_stages "${CONFIG_NAME:-validate_0p6b}" "${SCHEDULE[@]}"

@@ -1,0 +1,122 @@
+# EXPERIMENTAL validation run: Qwen3.5-0.8B GRPO, sglang multi-turn tool calling.
+# Cloned from validate_0p6b.yaml; model + tool-call format + thinking control swapped.
+#
+# STATUS 2026-07-07: PREPARED BUT NOT CLEARED -- Qwen3-0.6B stays primary until
+# a 1-step smoke of THIS config passes on a pod. Compat findings (details in
+# training/README.md "Qwen3.5 option"):
+#   * Tool calls: Qwen3.5 does NOT emit hermes-format <tool_call>{json}; official
+#     serving guidance is --tool-call-parser qwen3_coder (XML-ish <function=...>).
+#     verl 0.8's multi_turn.format documents "hermes, llama3_json, ..." -- whether
+#     the qwen3_coder value passes through to sglang's FunctionCallParser in the
+#     rollout is UNVERIFIED, and upstream reports call the family's tool-call
+#     format "unstable" without tool_choice forcing (verl#6223), which RL rollout
+#     cannot use.
+#   * Thinking: ON by default for Qwen3.5 (unlike our enable_thinking=False smoke
+#     assumption for Qwen3). We force non-thinking below for rollout-length
+#     control (SID-1 length scheduling assumes the response budget is the
+#     answer/tool budget, not a reasoning budget).
+#   * Stack: needs transformers with the Qwen3_5 arch (checkpoints ship the
+#     multimodal Qwen3_5ForConditionalGeneration class) and sglang with Qwen3.5
+#     support; verl 0.8.0 pins sglang==0.5.12 -- verify at setup with a bare
+#     sglang.launch_server + one tool-call request. Open upstream issues exist
+#     for Qwen3.5 RL on the vLLM+FSDP2 path (verl#6549 illegal memory access,
+#     vllm#36275 text-only weight-name mismatch); verl 0.8 release notes claim
+#     Qwen3.5 only for Megatron/VeOmni, not the FSDP+sglang path we use.
+#
+# Launch (after the pod smoke): CONFIG_NAME=validate_0p8b training/launch/run_validate.sh
+# (or: ECS_EXTRA_OVERRIDES=... python -m verl.trainer.main_ppo --config-name=validate_0p8b)
+
+hydra:
+  searchpath:
+    - pkg://verl.trainer.config
+
+defaults:
+  - ppo_trainer
+  - _self_
+
+data:
+  train_files: data/rl/train.parquet
+  val_files: data/rl/val.parquet
+  train_batch_size: 32
+  max_prompt_length: 2048
+  max_response_length: 6144             # 8k total; 0.8B has 256K native -- we stay small on purpose
+  return_raw_chat: true
+  shuffle: true
+  filter_overlong_prompts: true
+  truncation: error
+  # Qwen3.5 thinks BY DEFAULT; disable for rollout-length control. Non-thinking
+  # is the deliberate choice: thinking tokens would consume most of the response
+  # budget during early training and defeat SID-1-style length scheduling.
+  # (Same kwarg the smoke test passes to tokenizer.apply_chat_template.)
+  apply_chat_template_kwargs:
+    enable_thinking: false
+
+algorithm:
+  adv_estimator: grpo
+  use_kl_in_reward: false
+  norm_adv_by_std_in_grpo: true         # see validate_0p6b.yaml for the Dr. GRPO caveat
+
+actor_rollout_ref:
+  hybrid_engine: true
+  model:
+    path: Qwen/Qwen3.5-0.8B
+    use_remove_padding: true
+    enable_gradient_checkpointing: true
+  actor:
+    optim:
+      lr: 1.0e-6
+    ppo_mini_batch_size: 32
+    ppo_micro_batch_size_per_gpu: 4     # 0.8B @ 8k on 80GB; drop to 2 on a 48GB card
+    use_kl_loss: false
+    kl_loss_coef: 0.001
+    kl_loss_type: low_var_kl
+    entropy_coeff: 0
+    loss_agg_mode: token-mean
+    fsdp_config:
+      param_offload: false
+      optimizer_offload: false
+  rollout:
+    name: sglang
+    n: 8
+    # Qwen team's non-thinking text recommendation is temp=1.0/top_p=1.0 (plus
+    # presence_penalty=2.0 for SERVING -- deliberately NOT set here: repetition
+    # penalties distort the sampling distribution GRPO's logprobs assume).
+    temperature: 1.0
+    top_p: 1.0
+    prompt_length: ${data.max_prompt_length}
+    response_length: ${data.max_response_length}
+    gpu_memory_utilization: 0.5         # 0.40-0.45 on a single 48GB card
+    tensor_model_parallel_size: 1
+    multi_turn:
+      enable: true
+      max_assistant_turns: 9
+      max_user_turns: 8
+      # Qwen3.5 tool-call emission format (NOT hermes). UNVERIFIED pass-through
+      # in verl 0.8 -- this line is the first thing the pod smoke must prove.
+      # If verl rejects the value, the model is blocked until verl exposes the
+      # qwen3_coder parser for sglang multi-turn (do NOT fall back to hermes:
+      # the parser would silently strip/miss tool calls and the policy would
+      # train on broken trajectories).
+      format: qwen3_coder
+      tool_config_path: training/configs/tools_ecs.yaml
+      tokenization_sanity_check_mode: strict
+  ref:
+    fsdp_config:
+      param_offload: true
+
+custom_reward_function:
+  path: training/env/reward.py
+  name: compute_score
+
+trainer:
+  project_name: ecs-grpo
+  experiment_name: validate-qwen3.5-0.8b
+  logger: ["console", "wandb"]
+  n_gpus_per_node: 2                    # 1 works (48GB+); see README validation pod tiers
+  nnodes: 1
+  save_freq: 25
+  test_freq: 10
+  total_epochs: 5
+  val_before_train: true
+  default_local_dir: checkpoints/${trainer.project_name}/${trainer.experiment_name}
+  resume_mode: auto
