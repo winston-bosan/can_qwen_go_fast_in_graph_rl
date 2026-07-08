@@ -101,6 +101,15 @@ def ask(payload: dict) -> JSONResponse:
     t0 = time.time()
     try:
         if model.startswith("local:"):
+            # the RL fine-tune is prompt-loyal: serve it the exact system
+            # prompt it was trained with, not AgentBaseline's generic one
+            import eval.agent_baseline as _ab
+            from training.data import SYSTEM_PROMPT as _TRAIN_PROMPT
+            _ab.SYSTEM_PROMPT = _TRAIN_PROMPT + (
+                "\n\nLATENCY MODE: minimize round-trips. Issue ALL tool calls "
+                "you need in a SINGLE turn (they run in parallel), then give the "
+                "final entities block immediately in your next turn."
+            )
             # trained checkpoint served on sglang (via SSH tunnel), OpenAI-compatible
             from openai import OpenAI as _OpenAI
             baseline = AgentBaseline(model=model.split(":", 1)[1])
