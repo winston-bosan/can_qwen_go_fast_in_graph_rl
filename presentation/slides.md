@@ -186,7 +186,7 @@ step 60:   0.282          <- +119%, FINAL
 <!-- pause -->
 
 **The headline: 2.4 hours of RL takes the 1.7B past the untrained 4B (0.188)
-— a model 2.4x its size — and to 62%% of MiniMax-M3's frontier score.**
+— a model 2.4x its size — and to 62% of MiniMax-M3's frontier score.**
 Total training cost: about the price of lunch.
 
 <!-- end_slide -->
@@ -261,7 +261,11 @@ Threats to validity (read before believing anything)
    abstraction may be unavoidable at scale. We punted on it, visibly.
 4. **Query profile mismatch**: our questions have exact, small answer sets.
    Real queries are vague, underspecified, and have fuzzy relevance.
-5. **Unknown unknowns.** The eval set and the training set share a generator.
+5. **Distribution transfer is already visibly imperfect**: the trained model's
+   val-split gains (0.282) shrink on the older pre-guards pilot set (0.203,
+   with answer-set recall near zero — the NDCG there is mostly bridge credit).
+   Same generator, different vintage, measurable gap.
+6. **Unknown unknowns.** The eval set and the training set share a generator.
    Every number above should be re-earned on FRAMES-style external questions.
 
 <!-- end_slide -->
