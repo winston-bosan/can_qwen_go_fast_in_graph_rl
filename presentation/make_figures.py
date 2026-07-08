@@ -60,16 +60,11 @@ ax.annotate("", xy=(px, py - 0.008), xytext=(px, pre[1.7] + 0.008),
 ax.annotate("+0.15 NDCG\n(2.4h RL, 1x A100)", xy=(px * 0.88, (py + pre[1.7]) / 2),
             fontsize=9.5, color=INK, va="center", ha="right")
 
-# 9B anecdote: hollow marker, clearly flagged
-ax.scatter([anecdote[0]], [anecdote[1]], s=80, facecolors="white",
-           edgecolors=GREY, lw=1.6, zorder=3)
-ax.annotate("Qwen3.5-9B (n=1,\nnot fitted)", xy=(anecdote[0], anecdote[1]),
-            xytext=(anecdote[0] * 0.52, anecdote[1] - 0.03), fontsize=9, color=MUT)
 
 # frontier reference band
-for name, v, dy in (("MiniMax-M3  0.456", 0.456, 0.012), ("DeepSeek-v4-pro  0.387", 0.387, -0.030)):
+for name, v in (("MiniMax-M3  0.456", 0.456), ("DeepSeek-v4-pro  0.387", 0.387)):
     ax.axhline(v, color=GRID, lw=1.2, zorder=1)
-    ax.annotate(name, xy=(0.52, v + dy), fontsize=9, color=MUT)
+    ax.annotate(name, xy=(10.4, v), fontsize=9, color=MUT, ha="right", va="bottom")
 
 for k in pre:
     ax.annotate(f"{pre[k]:.3f}", xy=(k, pre[k] - 0.034), fontsize=9, color=MUT, ha="center")
@@ -79,12 +74,11 @@ ax.set_xscale("log")
 ax.set_xticks([0.6, 1.7, 4, 9])
 ax.set_xticklabels(["0.6B", "1.7B", "4B", "9B"])
 ax.set_xlim(0.45, 11)
-ax.set_ylim(0, 0.95)
-ax.set_xlabel("policy parameters (log scale)")
-ax.set_ylabel("two-tier NDCG@50 (held-out)")
-ax.set_title("RL lift vs base-model scale — Qwen3 + graph tools", fontsize=12, pad=12)
+ax.set_ylim(0, 0.5)
+ax.set_xlabel("parameters")
+ax.set_ylabel("NDCG*")
 ax.grid(axis="y", color=GRID, lw=0.7)
-ax.legend(frameon=False, loc="upper left", fontsize=9.5)
+ax.legend(frameon=False, loc="lower right", fontsize=9.5)
 ax.spines[["top", "right"]].set_visible(False)
 fig.tight_layout()
 fig.savefig("presentation/fig_scaling.png", bbox_inches="tight")
@@ -96,9 +90,9 @@ pts = [
     ("vector-only", 0.6, 0.073, "floor", False),
     ("Qwen3-0.6B", 6.1, 0.060, "local", False),
     ("Qwen3-4B", 14.9, 0.188, "local", False),
-    ("Qwen3.5-9B (n=1)", 31.1, 0.86, "local", False),
     ("MiniMax-M3", 21.0, 0.456, "api", False),
     ("DeepSeek-v4-pro", 47.1, 0.387, "api", False),
+    ("Claude (Fable)", 24.0, 0.976, "api", False),
     ("Qwen3-1.7B +RL", 2.4, 0.203, "local", True),  # MEASURED: n=50 pilot, one-shot mode, sglang/A100
 ]
 
@@ -129,16 +123,13 @@ ax2.plot(fx, fy, color=GRID, lw=1.4, ls="--", zorder=1, drawstyle="steps-post")
 
 ax2.set_xscale("log")
 ax2.set_xticks([1, 3, 10, 30])
-ax2.set_xticklabels(["1s", "3s", "10s", "30s"])
+ax2.set_xticklabels(["1", "3", "10", "30"])
 ax2.set_xlim(0.4, 90)
-ax2.set_ylim(0, 0.95)
-ax2.set_xlabel("end-to-end latency per question (log scale)")
-ax2.set_ylabel("two-tier NDCG@50")
-ax2.set_title("Latency vs quality — the axis we actually care about", fontsize=12, pad=12)
+ax2.set_ylim(0, 1.05)
+ax2.set_xlabel("latency (sec)")
+ax2.set_ylabel("NDCG*")
 ax2.grid(axis="y", color=GRID, lw=0.7)
 ax2.spines[["top", "right"]].set_visible(False)
-ax2.annotate("serving stacks differ (transformers/vllm/API); 1.7B+RL measured\non sglang/A100 (2.4s one-shot mode; 1.9s capped at NDCG 0.13)",
-             xy=(0.02, 0.97), xycoords="axes fraction", fontsize=8, color=MUT, va="top")
 fig2.tight_layout()
 fig2.savefig("presentation/fig_pareto.png", bbox_inches="tight")
 print("wrote presentation/fig_scaling.png, presentation/fig_pareto.png")
