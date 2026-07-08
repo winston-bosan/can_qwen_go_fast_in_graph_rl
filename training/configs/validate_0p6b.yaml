@@ -105,7 +105,7 @@ trainer:
   project_name: ecs-grpo
   experiment_name: validate-qwen3-0.6b
   logger: ["console", "wandb"]
-  n_gpus_per_node: 2                    # set 1 for a single-GPU box; raise micro-batch if >2
+  n_gpus_per_node: 1                    # vast.ai validation box = 1x A100-80GB; set 2+ on multi-GPU pods
   nnodes: 1
   save_freq: 25
   test_freq: 10
