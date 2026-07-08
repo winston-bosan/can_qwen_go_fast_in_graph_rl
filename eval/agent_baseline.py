@@ -117,14 +117,50 @@ _FALLBACK_TOOLS: list[dict] = [
 ]
 
 
-def tool_schemas() -> list[dict]:
-    """OpenAI-format tool schemas, preferring the tool server's own."""
+RUN_CYPHER_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "run_cypher",
+        "description": (
+            "Run a READ-ONLY Cypher query against the Wikidata5M knowledge graph. "
+            "Data model: nodes are (:Entity {qid, title}); relationships are typed by "
+            "Wikidata P-id (e.g. [:P57]) and carry a human-readable `label` property. "
+            "Common relations: P57 director (film->director), P69 educated at "
+            "(person->school), P50 author (work->author), P463 member of (person->org), "
+            "P108 employer (person->org), P112 founded by (org->founder), P106 occupation, "
+            "P161 cast member (film->actor), P17 country, P127 owned by. "
+            "Results are capped at 100 rows and 2 seconds; write clauses are rejected. "
+            "Example: MATCH (f:Entity)-[:P57]->(d:Entity)-[:P69]->(s:Entity {qid: 'Q13371'}) "
+            "RETURN f.qid, f.title"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "The Cypher query (read-only)."}
+            },
+            "required": ["query"],
+        },
+    },
+}
+
+
+def tool_schemas(arm: str = "ours") -> list[dict]:
+    """OpenAI-format tool schemas, preferring the tool server's own.
+
+    arm: "ours" = the 4-primitive API; "cypher" = vector_search + run_cypher.
+    """
     try:
         from toolserver.schema import OPENAI_TOOLS  # owned by workstream A
 
-        return list(OPENAI_TOOLS)
+        base = list(OPENAI_TOOLS)
     except Exception:
-        return _FALLBACK_TOOLS
+        base = _FALLBACK_TOOLS
+    if arm == "ours":
+        return base
+    if arm == "cypher":
+        vs = [t for t in base if t["function"]["name"] == "vector_search"]
+        return vs + [RUN_CYPHER_TOOL]
+    raise ValueError(f"unknown arm: {arm!r}")
 
 
 class AgentBaseline:
