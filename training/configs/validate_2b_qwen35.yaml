@@ -1,0 +1,112 @@
+# Limited validation run: Qwen3.5-2B GRPO, sglang multi-turn tool calling.
+# Sized for the vast.ai 1x A100-80GB box. Cloned from validate_0p6b.yaml
+# (with the seven verl-smoke fixes) + the Qwen3.5 deltas.
+#
+# STACK: requires the parallel venv /root/.venv-train-q35 (verl 0.8.0 +
+# sglang 0.5.10 + transformers 5.3.0 + torch 2.9.1 + flash-attn cu13torch2.9
+# wheel) -- the qualified .venv-train (sglang 0.5.8 / tfm 4.57.1) does NOT
+# know the qwen3_5 arch. Drive via: ECS_TRAIN_VENV=/root/.venv-train-q35
+#
+# Launch: ECS_TRAIN_VENV=/root/.venv-train-q35 CONFIG_NAME=validate_2b_qwen35 \
+#         WANDB_MODE=offline ECS_REWARD_CONFIG=... training/launch/run_validate.sh
+#
+# Qwen3.5 specifics (verified 2026-07-08 clearance work):
+#   - tool calls: the chat template emits qwen3_coder XML (<function=...>),
+#     NOT hermes JSON -> multi_turn.format: qwen3_coder (registered in verl
+#     0.8's agent-loop ToolParser registry as Qwen3XMLToolParser).
+#   - thinking: ON by default -> data.apply_chat_template_kwargs disables it;
+#     verl's agent loop re-applies these kwargs on EVERY turn.
+# VRAM estimate (80GB card): trainer side ~32GB (2B full-FT: bf16 params 4 +
+# fp32 master 8 + Adam m/v 16 + grads 4) + engine 0.4*80 = 32GB + activations
+# (grad ckpt, micro 2) ~4-6GB => ~70GB with headroom.
+
+hydra:
+  searchpath:
+    - pkg://verl.trainer.config
+
+defaults:
+  - ppo_trainer
+  - _self_
+
+data:
+  train_files: data/rl/train.parquet
+  val_files: data/rl/val.parquet
+  train_batch_size: 32
+  max_prompt_length: 2048
+  max_response_length: 6144             # run_validate.sh LENGTH_SCHEDULE overrides per stage
+  return_raw_chat: true
+  shuffle: true
+  filter_overlong_prompts: true
+  truncation: error
+  # Qwen3.5 thinks by default; force non-thinking for rollout-length control
+  # (SID-1 length scheduling budgets answer/tool tokens, not reasoning tokens).
+  apply_chat_template_kwargs:
+    enable_thinking: false
+
+algorithm:
+  adv_estimator: grpo
+  use_kl_in_reward: false
+  norm_adv_by_std_in_grpo: true
+
+actor_rollout_ref:
+  hybrid_engine: true
+  model:
+    path: Qwen/Qwen3.5-2B
+    # flash_attn present in .venv-train-q35 (same cu13torch2.9 prebuilt wheel;
+    # torch pin unchanged at 2.9.1 by sglang 0.5.10).
+    use_remove_padding: true
+    enable_gradient_checkpointing: true
+  actor:
+    optim:
+      lr: 1.0e-6
+    ppo_mini_batch_size: 32
+    ppo_micro_batch_size_per_gpu: 2     # 2B @ 8k ctx on the shared 80GB card
+    use_kl_loss: false
+    kl_loss_coef: 0.001
+    kl_loss_type: low_var_kl
+    entropy_coeff: 0
+    loss_agg_mode: token-mean
+    fsdp_config:
+      param_offload: false
+      optimizer_offload: false
+  rollout:
+    name: sglang
+    agent:
+      default_agent_loop: tool_agent    # REQUIRED: default single_turn_agent never calls tools
+    n: 8
+    temperature: 1.0
+    top_p: 1.0
+    prompt_length: ${data.max_prompt_length}
+    response_length: ${data.max_response_length}
+    gpu_memory_utilization: 0.4         # 2B engine colocated w/ 32GB trainer state
+    tensor_model_parallel_size: 1
+    log_prob_micro_batch_size_per_gpu: 4
+    multi_turn:
+      enable: true
+      max_assistant_turns: 9
+      max_user_turns: 8
+      format: qwen3_coder               # Qwen3.5 emits qwen3_coder XML, NOT hermes;
+                                        # hermes here would silently eat every tool call
+      tool_config_path: training/configs/tools_ecs.yaml
+      tokenization_sanity_check_mode: strict
+  ref:
+    log_prob_micro_batch_size_per_gpu: 4
+    fsdp_config:
+      param_offload: true
+
+custom_reward_function:
+  path: training/env/reward.py
+  name: compute_score
+
+trainer:
+  project_name: ecs-grpo
+  experiment_name: validate-qwen35-2b
+  logger: ["console", "wandb"]
+  n_gpus_per_node: 1
+  nnodes: 1
+  save_freq: 25
+  test_freq: 10
+  total_epochs: 5
+  val_before_train: false               # limited run: skip upfront val pass, sample instead
+  default_local_dir: checkpoints/${trainer.project_name}/${trainer.experiment_name}
+  resume_mode: auto
