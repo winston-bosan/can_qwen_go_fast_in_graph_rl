@@ -32,7 +32,7 @@ plt.rcParams.update({
 # ---------------------------------------------------------------- figure 1
 # params (B) -> NDCG. pre-RL in grey, post-RL in black.
 pre = {0.6: 0.060, 1.7: 0.129, 4.0: 0.188}   # 0.6B/4B pilot-style sets, 1.7B = val@step0
-post = {1.7: 0.259}                            # val@step40, still training
+post = {1.7: 0.282}                            # val@step60, final
 anecdote = (9.0, 0.86)                         # Qwen3.5-9B, n=1 -- shown, not fitted
 
 fig, ax = plt.subplots(figsize=(8, 5), dpi=200)
@@ -57,7 +57,7 @@ ax.scatter([px], [py], s=110, color=INK, zorder=5)
 # the lift arrow at 1.7B
 ax.annotate("", xy=(px, py - 0.008), xytext=(px, pre[1.7] + 0.008),
             arrowprops=dict(arrowstyle="-|>", color=INK, lw=1.6))
-ax.annotate("+0.13 NDCG\n(~90 min RL, 1x A100)", xy=(px * 0.88, (py + pre[1.7]) / 2),
+ax.annotate("+0.15 NDCG\n(2.4h RL, 1x A100)", xy=(px * 0.88, (py + pre[1.7]) / 2),
             fontsize=9.5, color=INK, va="center", ha="right")
 
 # 9B anecdote: hollow marker, clearly flagged
@@ -99,7 +99,7 @@ pts = [
     ("Qwen3.5-9B (n=1)", 31.1, 0.86, "local", False),
     ("MiniMax-M3", 21.0, 0.456, "api", False),
     ("DeepSeek-v4-pro", 47.1, 0.387, "api", False),
-    ("Qwen3-1.7B +RL", 8.0, 0.259, "local", True),  # latency provisional: post-run eval pending
+    ("Qwen3-1.7B +RL", 2.4, 0.203, "local", True),  # MEASURED: n=50 pilot, one-shot mode, sglang/A100
 ]
 
 fig2, ax2 = plt.subplots(figsize=(8, 5), dpi=200)
@@ -137,7 +137,7 @@ ax2.set_ylabel("two-tier NDCG@50")
 ax2.set_title("Latency vs quality — the axis we actually care about", fontsize=12, pad=12)
 ax2.grid(axis="y", color=GRID, lw=0.7)
 ax2.spines[["top", "right"]].set_visible(False)
-ax2.annotate("serving stacks differ (transformers/vllm/API);\n1.7B+RL latency provisional until post-run eval",
+ax2.annotate("serving stacks differ (transformers/vllm/API); 1.7B+RL measured\non sglang/A100 (2.4s one-shot mode; 1.9s capped at NDCG 0.13)",
              xy=(0.02, 0.97), xycoords="axes fraction", fontsize=8, color=MUT, va="top")
 fig2.tight_layout()
 fig2.savefig("presentation/fig_pareto.png", bbox_inches="tight")

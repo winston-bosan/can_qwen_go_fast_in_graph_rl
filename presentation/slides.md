@@ -168,7 +168,7 @@ verl 0.8 + sglang, multi-turn tool rollouts (batch 32 x group 8 = 256/step),
 length schedule 2048 -> 4096, ~170s/step.
 
 ```
-train reward   0.07 ─────► 0.23   (steps 1-31, still climbing)
+train reward   0.07 ─────► 0.285  (60 steps, never flattened)
 response len   1,900 ─────► 1,300 tokens   (less waffle, more reward)
 tool turns     ~5.5 ─────► ~4.2            (fewer, better-aimed calls)
 ```
@@ -179,14 +179,15 @@ tool turns     ~5.5 ─────► ~4.2            (fewer, better-aimed call
 
 ```
 step 0:    0.129          <- untrained 1.7B
-step ~15:  0.180
-step 30:   0.218          <- +69%, still rising into stage 2
+step 30:   0.218
+step 60:   0.282          <- +119%, FINAL
 ```
 
 <!-- pause -->
 
-**The headline: after ~90 minutes of RL, the 1.7B passes the untrained 4B
-(0.188) — a model 2.4x its size.** Total training cost: about the price of lunch.
+**The headline: 2.4 hours of RL takes the 1.7B past the untrained 4B (0.188)
+— a model 2.4x its size — and to 62%% of MiniMax-M3's frontier score.**
+Total training cost: about the price of lunch.
 
 <!-- end_slide -->
 
@@ -202,9 +203,20 @@ Latency is what we actually care about
 
 ![](fig_pareto.png)
 
-MiniMax-M3: 0.456 NDCG at 21s/q. DeepSeek-v4-pro: 0.387 at **47s/q**.
-Our trained 1.7B: 0.259 at ~8s/q on modest serving — and the whole point
-of a small policy is that this latency has real headroom left.
+**Measured on the trained 1.7B (sglang, A100, single-stream):**
+
+| mode | wall/q | NDCG |
+|---|---|---|
+| as trained | 2.58s | 0.167 |
+| "batch your tool calls" prompt | 2.50s | **0.199** (+19% free) |
+| + hard 2-turn cap | 2.19s | 0.183 |
+| aggressive cap | **1.86s** | 0.132 |
+
+Found along the way: telling the model to batch tool calls in ONE turn made it
+fire 10.5 parallel calls instead of 6.6 sequential ones — **quality up 19% at
+equal latency.** Decode is now the floor (~480 tok @ ~200 tok/s); the path to
+~1s is H200 bandwidth + fp8 + the 2-turn shape, not more prompt surgery.
+(MiniMax-M3: 21s/q. DeepSeek-v4-pro: 47s/q.)
 
 <!-- end_slide -->
 
