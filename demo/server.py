@@ -100,10 +100,19 @@ def ask(payload: dict) -> JSONResponse:
 
     t0 = time.time()
     try:
-        baseline = AgentBaseline(model=model)
-        reason = baseline.unavailable_reason()
-        if reason:
-            return JSONResponse({"error": reason})
+        if model.startswith("local:"):
+            # trained checkpoint served on sglang (via SSH tunnel), OpenAI-compatible
+            from openai import OpenAI as _OpenAI
+            baseline = AgentBaseline(model=model.split(":", 1)[1])
+            baseline._client = _OpenAI(
+                base_url=os.environ.get("ECS_LOCAL_LLM_URL", "http://localhost:30010/v1"),
+                api_key="EMPTY",
+            )
+        else:
+            baseline = AgentBaseline(model=model)
+            reason = baseline.unavailable_reason()
+            if reason:
+                return JSONResponse({"error": reason})
         record = QuestionRecord(
             id="demo",
             question=question,

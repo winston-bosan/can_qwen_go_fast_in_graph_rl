@@ -166,7 +166,7 @@
     <form class="searchbar" id="form">
       <input id="q" autocomplete="off"
         value="Which films were directed by someone who attended Harvard University?" />
-      <button type="submit" id="go">Ask</button>
+      <select id="modelSel" style="padding:0.5rem;border-radius:8px;"><option value="local:qwen3-1.7b-rl60">ours: Qwen3-1.7B +RL (fast)</option><option value="minimax/minimax-m3">frontier: MiniMax-M3 (slow)</option></select><button type="submit" id="go">Ask</button>
     </form>
   </header>
 
@@ -262,7 +262,7 @@ $("form").addEventListener("submit", (ev) => {
   badge($("ours-badge"), null); badge($("exa-badge"), null);
   spinner($("ours")); spinner($("exa"));
 
-  const a = post("/ask", { question }).then(renderOurs);
+  const a = post("/ask", { question, model: document.getElementById("modelSel").value }).then(renderOurs);
   const b = post("/exa", { question }).then(renderExa);
   Promise.allSettled([a, b]).finally(() => { $("go").disabled = false; });
 });
