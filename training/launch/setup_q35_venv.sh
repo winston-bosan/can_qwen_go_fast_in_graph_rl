@@ -31,6 +31,15 @@ $P install -q "sglang[openai,srt]==0.5.10"     # pulls torch==2.9.1, transformer
 # used to provide it, 0.5.10's no longer does.
 $P install -q "verl==0.8.0" "tensordict>=0.8.0,!=0.9.0,<=0.10.0" "scipy==1.17.1" cachetools
 $P install -q "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3.post1/flash_attn-2.8.3+cu13torch2.9cxx11abiTRUE-cp312-cp312-linux_x86_64.whl"
+# Gated-DeltaNet fused kernels: WITHOUT both causal-conv1d AND fla importable,
+# transformers' modeling_qwen3_5 falls back to the naive
+# torch_chunk_gated_delta_rule, which crashes with a CUDA illegal memory
+# access under FSDP compute_log_prob (verl#6549 -- reproduced here at 2B).
+# is_fast_path_available in modeling_qwen3_5.py requires all four symbols.
+# causal-conv1d: prebuilt wheel (same no-nvcc rule as flash-attn);
+# flash-linear-attention: pure triton, no build step.
+$P install -q "https://github.com/Dao-AILab/causal-conv1d/releases/download/v1.6.2.post1/causal_conv1d-1.6.2.post1%2Bcu12torch2.9cxx11abiTRUE-cp312-cp312-linux_x86_64.whl"
+$P install -q flash-linear-attention
 $P install -q httpx pyyaml orjson pandas pyarrow
 
 "$VENV/bin/python" - <<'PY'
@@ -39,6 +48,9 @@ print("torch", torch.__version__, "cuda", torch.cuda.is_available())
 print("sglang", sglang.__version__, "| tfm", transformers.__version__,
       "| verl", verl.__version__, "| tensordict", tensordict.__version__,
       "| scipy", scipy.__version__, "| flash_attn", flash_attn.__version__)
+import transformers.models.qwen3_5.modeling_qwen3_5 as m
+assert m.is_fast_path_available, "GDN fused kernels missing (causal-conv1d/fla) -> naive path crashes, see verl#6549"
+print("qwen3_5 GDN fast path: ACTIVE")
 x = torch.randn(512, 512, device="cuda", dtype=torch.bfloat16)
 assert (x @ x).float().abs().mean().item() > 0, "bf16 matmul failed"
 from transformers import AutoConfig, AutoProcessor  # AutoProcessor: scipy-pin canary
