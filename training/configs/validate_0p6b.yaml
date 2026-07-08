@@ -75,6 +75,7 @@ actor_rollout_ref:
     response_length: ${data.max_response_length}
     gpu_memory_utilization: 0.5         # colocated with FSDP actor (hybrid engine)
     tensor_model_parallel_size: 1
+    log_prob_micro_batch_size_per_gpu: 8  # verl requires this or the non-per-gpu variant
     multi_turn:
       enable: true
       # 8 tool-call turns + 1 final answer turn. The rollout also stops early
@@ -87,6 +88,7 @@ actor_rollout_ref:
       # re-tokenization of the dialog (chat-template drift, added tokens, ...).
       tokenization_sanity_check_mode: strict
   ref:
+    log_prob_micro_batch_size_per_gpu: 8  # unused while KL is off; required if ref spins up
     fsdp_config:
       param_offload: true
 
