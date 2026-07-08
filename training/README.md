@@ -137,12 +137,34 @@ it. Findings:
    what the pod smoke must prove.
 
 **Clearance procedure** (cheap, ~30 min on the validation pod): bare
-`sglang.launch_server --model-path Qwen/Qwen3.5-0.8B --tool-call-parser
-qwen3_coder` + one tool-call request; then
-`CONFIG_NAME=validate_0p8b trainer.total_training_steps=1 run_validate.sh` and
-check (a) no config rejection on `format`, (b) rollout log shows parsed tool
-calls, (c) `tokenization_sanity_check_mode: strict` stays quiet. Until then:
+`sglang.launch_server --model-path <Qwen3.5 model>` + one tool-call request;
+then a 1-step run (`trainer.total_training_steps=1`) and check (a) no config
+rejection on `format`, (b) rollout log shows parsed tool calls, (c)
+`tokenization_sanity_check_mode: strict` stays quiet. Until then:
 **Qwen3-0.6B primary**.
+
+**CLEARANCE RUN 2026-07-08 (Qwen3.5-2B, vast A100): FAILED at arch load** —
+the blocker is the pinned stack, not the tool-call path:
+
+- `sglang==0.5.8` (verl 0.8.0's exact `sglang`-extra pin) has no `qwen3_5`
+  model module (`srt/models/` tops out at qwen3 / qwen3_next / qwen3_vl);
+  bare `launch_server` dies with `KeyError: 'qwen3_5'`.
+- `transformers==4.57.1` (resolved by verl 0.8.0) rejects the checkpoint —
+  `ValueError: ... model type 'qwen3_5' but Transformers does not recognize
+  this architecture` — so the FSDP actor side is equally blocked, and
+  sglang's generic `TransformersForCausalLM` fallback dead-ends on the same
+  error.
+- **Positives confirmed while checking** (reusable for any future Qwen3.5/3.6
+  attempt): verl 0.8's agent-loop ToolParser registry DOES include
+  `qwen3_coder` (`Qwen3XMLToolParser` in
+  `verl/experimental/agent_loop/tool_parser.py`); the Qwen3.5 chat template
+  DOES emit that format (`<function=` markers) and honors `enable_thinking`;
+  and the agent loop applies `data.apply_chat_template_kwargs` on **every**
+  turn, so non-thinking mode holds across whole trajectories.
+- Unblocking = sglang ≥ the release that added `qwen3_5` + transformers ≥5.x
+  + re-verifying torch/flash-attn — i.e. leaving verl 0.8.0's tested matrix
+  and re-running the training smoke. Zero-compat-risk fallback:
+  **Qwen3-1.7B** (hermes-native sibling) — user's call.
 
 ### Qwen3.5-4B for the MAIN run? (finding only — decision is the user's)
 
