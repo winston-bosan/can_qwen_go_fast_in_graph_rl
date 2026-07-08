@@ -199,7 +199,11 @@ def aggregate(rows: list[dict], k: int) -> dict[str, Any]:
 
 
 async def run(args: argparse.Namespace) -> int:
-    tools = get_tool_schemas()
+    if getattr(args, "arm", "ours") != "ours":
+        from eval.agent_baseline import tool_schemas as _arm_schemas
+        tools = _arm_schemas(args.arm)
+    else:
+        tools = get_tool_schemas()
     if args.mock_tools:
         client: Any = MockToolClient(args.fixture)
     else:
