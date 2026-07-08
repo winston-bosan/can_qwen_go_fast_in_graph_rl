@@ -16,6 +16,20 @@ run_stages() {
     local -a stages=("$@")
     cd "$ROOT"
     export PYTHONPATH="$ROOT:$ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
+    # sglang scheduler subprocesses get LD_PRELOADed with torch_memory_saver,
+    # which links libcudart.so.12. That lib lives in the venv's pip-provided
+    # nvidia dirs, invisible to child processes by default -> the scheduler
+    # dies with exit 127 ("libcudart.so.12: cannot open shared object file").
+    # Export the venv CUDA lib dirs so every descendant process can resolve it.
+    local nvlibs
+    nvlibs="$("$VENV/bin/python" - <<'PY'
+import glob, os, sysconfig
+sp = sysconfig.get_paths()["purelib"]
+dirs = sorted(glob.glob(os.path.join(sp, "nvidia", "*", "lib"))) + [os.path.join(sp, "torch", "lib")]
+print(":".join(d for d in dirs if os.path.isdir(d)))
+PY
+)"
+    export LD_LIBRARY_PATH="$nvlibs${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
     for stage in "${stages[@]}"; do
         local resp="${stage%%:*}" steps="${stage#*:}" until_msg=""
         local -a extra=("data.max_response_length=$resp")

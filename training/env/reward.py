@@ -32,12 +32,12 @@ verl entry point: ``compute_score`` matches verl's ``custom_reward_function``
 signature (see configs/*.yaml -> custom_reward_function.path/name).
 """
 
-from __future__ import annotations
-
 import json
 import logging
 import os
 import re
+import sys
+import types
 import warnings
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -45,6 +45,17 @@ from typing import Any, Callable
 import yaml
 
 import training  # noqa: F401  (sys.path setup)
+
+# verl's custom_reward_function loader execs this file as a module WITHOUT
+# registering it in sys.modules. Python 3.12's @dataclass then crashes in
+# dataclasses._is_type (sys.modules.get(cls.__module__).__dict__ -> None) when
+# annotations are strings. We therefore avoid `from __future__ import
+# annotations` here AND self-register a shim so later introspection always
+# finds a live module object.
+if __name__ not in sys.modules:  # pragma: no cover - only under verl's loader
+    _shim = types.ModuleType(__name__)
+    _shim.__dict__.update(globals())
+    sys.modules[__name__] = _shim
 
 logger = logging.getLogger(__name__)
 
