@@ -166,6 +166,19 @@ the blocker is the pinned stack, not the tool-call path:
   and re-running the training smoke. Zero-compat-risk fallback:
   **Qwen3-1.7B** (hermes-native sibling) — user's call.
 
+**UNBLOCKED 2026-07-08 (user decision — upgraded stack in a parallel venv):**
+`launch/setup_q35_venv.sh` builds `.venv-train-q35` = verl 0.8.0 + **sglang
+0.5.10** (newest release with `qwen3_5.py` that still pins torch==2.9.1, so
+torch and the flash-attn cu13torch2.9 wheel stay identical to the qualified
+stack) + **transformers 5.3.0** (sglang 0.5.10's pin) + scipy 1.17.1 /
+cachetools pins (resolver landmines — see script comments). Verified on the
+vast A100: the qwen3_5 arch loads and serves under bare sglang 0.5.10, and a
+`tools=` request returns **structured tool_calls via the qwen3_coder parser**
+with `enable_thinking: false` suppressing thinking blocks. Drive configs with
+`ECS_TRAIN_VENV=$HOME/.venv-train-q35 CONFIG_NAME=validate_2b_qwen35`. The
+default `.venv-train` (sglang 0.5.8, Qwen3 family) stays untouched as the
+qualified fallback.
+
 ### Qwen3.5-4B for the MAIN run? (finding only — decision is the user's)
 
 Qwen3.5 ships a 4B tier (`Qwen/Qwen3.5-4B`, plus 2B/9B siblings; the
