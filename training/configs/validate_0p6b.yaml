@@ -48,13 +48,12 @@ actor_rollout_ref:
   hybrid_engine: true
   model:
     path: Qwen/Qwen3-0.6B
-    # flash_attn is not installed on the vast A100 box (compile vs torch
-    # 2.9.1+cu128 not worth it for a 0.6B). sdpa + padded compute costs a few
-    # percent here; the main 4B run SHOULD install flash-attn and flip these.
-    use_remove_padding: false           # true requires flash_attn (bert_padding unpad kernels)
+    # flash_attn required: verl's CUDA pad/unpad path imports
+    # flash_attn.bert_padding unconditionally. On the vast A100 box (torch
+    # 2.9.1+cu128, nvcc 13 -> no source build) the cu13torch2.9 prebuilt wheel
+    # from the v2.8.3.post1 GitHub release works (statically-linked cudart).
+    use_remove_padding: true
     enable_gradient_checkpointing: true
-    override_config:
-      attn_implementation: sdpa         # verl default is flash_attention_2
   actor:
     optim:
       lr: 1.0e-6
