@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Graph-RL harness vs Exa</title>
+<style>
+  :root {
+    --bg: #f7f7f8;
+    --panel: #ffffff;
+    --border: #e2e2e6;
+    --text: #1a1a1e;
+    --muted: #6b6b74;
+    --accent: #3757d6;
+    --accent-soft: #eef1fd;
+    --shadow: 0 1px 3px rgba(0,0,0,.06), 0 1px 2px rgba(0,0,0,.04);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16161a;
+      --panel: #1e1e24;
+      --border: #2e2e36;
+      --text: #ececf1;
+      --muted: #9a9aa6;
+      --accent: #8ea2ff;
+      --accent-soft: #23283d;
+      --shadow: none;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+  }
+  header {
+    max-width: 1120px;
+    margin: 0 auto;
+    padding: 40px 24px 8px;
+    text-align: center;
+  }
+  h1 { font-size: 22px; font-weight: 650; margin: 0 0 4px; }
+  header p { color: var(--muted); margin: 0 0 24px; font-size: 14px; }
+  .searchbar {
+    display: flex;
+    gap: 10px;
+    max-width: 760px;
+    margin: 0 auto;
+  }
+  #q {
+    flex: 1;
+    padding: 13px 16px;
+    font-size: 15px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--panel);
+    color: var(--text);
+    outline: none;
+  }
+  #q:focus { border-color: var(--accent); }
+  button {
+    padding: 0 22px;
+    font-size: 15px;
+    font-weight: 550;
+    border: none;
+    border-radius: 10px;
+    background: var(--accent);
+    color: #fff;
+    cursor: pointer;
+  }
+  button:disabled { opacity: .55; cursor: default; }
+  main {
+    max-width: 1120px;
+    margin: 0 auto;
+    padding: 28px 24px 60px;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+  }
+  @media (max-width: 780px) { main { grid-template-columns: 1fr; } }
+  .pane {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    box-shadow: var(--shadow);
+    min-height: 160px;
+    display: flex;
+    flex-direction: column;
+  }
+  .pane-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 16px 18px;
+    border-bottom: 1px solid var(--border);
+  }
+  .pane-head h2 { font-size: 14px; font-weight: 650; margin: 0; }
+  .pane-head .sub { color: var(--muted); font-size: 12px; font-weight: 400; }
+  .badge {
+    flex: none;
+    font-size: 12px;
+    color: var(--muted);
+    background: var(--accent-soft);
+    border-radius: 999px;
+    padding: 3px 10px;
+    white-space: nowrap;
+  }
+  .body { padding: 6px 6px 10px; flex: 1; }
+  .placeholder, .error { color: var(--muted); padding: 22px 14px; font-size: 14px; }
+  .error { color: #d05656; }
+  @media (prefers-color-scheme: dark) { .error { color: #ff9b9b; } }
+
+  ol.entities { list-style: none; margin: 0; padding: 6px; counter-reset: rank; }
+  ol.entities li {
+    display: grid;
+    grid-template-columns: 26px 1fr;
+    gap: 4px 10px;
+    padding: 10px 12px;
+    border-radius: 10px;
+  }
+  ol.entities li:hover { background: var(--accent-soft); }
+  ol.entities li::before {
+    counter-increment: rank;
+    content: counter(rank);
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+    font-size: 13px;
+    padding-top: 1px;
+  }
+  .ent-title { font-weight: 600; }
+  .ent-qid { color: var(--muted); font-size: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; margin-left: 6px; }
+  .ent-snippet { grid-column: 2; color: var(--muted); font-size: 13px; }
+
+  .answer {
+    padding: 14px 16px;
+    margin: 8px;
+    background: var(--accent-soft);
+    border-radius: 10px;
+    white-space: pre-wrap;
+    font-size: 14px;
+  }
+  ul.links { list-style: none; margin: 0; padding: 6px; }
+  ul.links li { padding: 9px 12px; border-radius: 10px; }
+  ul.links li:hover { background: var(--accent-soft); }
+  ul.links a { color: var(--accent); text-decoration: none; font-weight: 550; }
+  ul.links a:hover { text-decoration: underline; }
+  .link-url { color: var(--muted); font-size: 12px; word-break: break-all; }
+  .link-snippet { color: var(--muted); font-size: 13px; margin-top: 2px; }
+
+  .spinner {
+    width: 20px; height: 20px; margin: 26px 14px;
+    border: 2.5px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin .7s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+  <header>
+    <h1>Graph-RL retrieval, side by side with Exa</h1>
+    <p>Ask a question. Left: our agent harness reasoning over a Wikidata5M knowledge graph. Right: Exa web search.</p>
+    <form class="searchbar" id="form">
+      <input id="q" autocomplete="off"
+        value="Which films were directed by someone who attended Harvard University?" />
+      <button type="submit" id="go">Ask</button>
+    </form>
+  </header>
+
+  <main>
+    <section class="pane">
+      <div class="pane-head">
+        <div>
+          <h2>Ours: graph-RL harness</h2>
+          <div class="sub">4 tools over Wikidata5M</div>
+        </div>
+        <span class="badge" id="ours-badge"></span>
+      </div>
+      <div class="body" id="ours">
+        <div class="placeholder">Results will appear here.</div>
+      </div>
+    </section>
+
+    <section class="pane">
+      <div class="pane-head">
+        <div>
+          <h2>Exa</h2>
+          <div class="sub">web search + answer</div>
+        </div>
+        <span class="badge" id="exa-badge"></span>
+      </div>
+      <div class="body" id="exa">
+        <div class="placeholder">Results will appear here.</div>
+      </div>
+    </section>
+  </main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => (s ?? "").replace(/[&<>"]/g, c => (
+  {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+
+function spinner(el) {
+  el.innerHTML = '<div class="spinner"></div>';
+}
+function badge(el, seconds) {
+  el.textContent = seconds != null ? seconds + "s" : "";
+}
+
+function renderOurs(data) {
+  badge($("ours-badge"), data.seconds);
+  const el = $("ours");
+  if (data.error) { el.innerHTML = `<div class="error">${esc(data.error)}</div>`; return; }
+  const ents = data.entities || [];
+  if (!ents.length) { el.innerHTML = '<div class="placeholder">No entities returned.</div>'; return; }
+  el.innerHTML = '<ol class="entities">' + ents.map(e => `
+    <li>
+      <div><span class="ent-title">${esc(e.title)}</span><span class="ent-qid">${esc(e.qid)}</span></div>
+      ${e.snippet ? `<div class="ent-snippet">${esc(e.snippet)}</div>` : ""}
+    </li>`).join("") + '</ol>';
+}
+
+function renderExa(data) {
+  badge($("exa-badge"), data.seconds);
+  const el = $("exa");
+  if (data.error) { el.innerHTML = `<div class="error">${esc(data.error)}</div>`; return; }
+  let html = "";
+  if (data.answer) html += `<div class="answer">${esc(data.answer)}</div>`;
+  const results = data.results || [];
+  if (results.length) {
+    html += '<ul class="links">' + results.map(r => `
+      <li>
+        <a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.title || r.url)}</a>
+        <div class="link-url">${esc(r.url)}</div>
+        ${r.snippet ? `<div class="link-snippet">${esc(r.snippet)}</div>` : ""}
+      </li>`).join("") + '</ul>';
+  }
+  el.innerHTML = html || '<div class="placeholder">No results returned.</div>';
+}
+
+async function post(path, body) {
+  try {
+    const r = await fetch(path, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(body),
+    });
+    return await r.json();
+  } catch (e) {
+    return { error: String(e) };
+  }
+}
+
+$("form").addEventListener("submit", (ev) => {
+  ev.preventDefault();
+  const question = $("q").value.trim();
+  if (!question) return;
+  $("go").disabled = true;
+  badge($("ours-badge"), null); badge($("exa-badge"), null);
+  spinner($("ours")); spinner($("exa"));
+
+  const a = post("/ask", { question }).then(renderOurs);
+  const b = post("/exa", { question }).then(renderExa);
+  Promise.allSettled([a, b]).finally(() => { $("go").disabled = false; });
+});
+</script>
+</body>
+</html>
