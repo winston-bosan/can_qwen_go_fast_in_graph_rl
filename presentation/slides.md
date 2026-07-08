@@ -190,6 +190,24 @@ step 30:   0.218          <- +69%, still rising into stage 2
 
 <!-- end_slide -->
 
+The two pictures
+===
+
+![](fig_scaling.png)
+
+<!-- end_slide -->
+
+Latency is what we actually care about
+===
+
+![](fig_pareto.png)
+
+MiniMax-M3: 0.456 NDCG at 21s/q. DeepSeek-v4-pro: 0.387 at **47s/q**.
+Our trained 1.7B: 0.259 at ~8s/q on modest serving — and the whole point
+of a small policy is that this latency has real headroom left.
+
+<!-- end_slide -->
+
 What we cut, and what cut us
 ===
 
