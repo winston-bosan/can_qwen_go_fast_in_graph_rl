@@ -75,6 +75,8 @@ actor_rollout_ref:
       optimizer_offload: false
   rollout:
     name: sglang
+    agent:
+      default_agent_loop: tool_agent  # REQUIRED: default single_turn_agent never calls tools
     n: 16                               # GRPO group size: 16 rollouts x 64 questions = 1024/step
     temperature: 1.0
     top_p: 1.0

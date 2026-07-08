@@ -77,6 +77,8 @@ actor_rollout_ref:
       optimizer_offload: false
   rollout:
     name: sglang
+    agent:
+      default_agent_loop: tool_agent  # REQUIRED: default single_turn_agent never calls tools
     n: 8
     # Qwen team's non-thinking text recommendation is temp=1.0/top_p=1.0 (plus
     # presence_penalty=2.0 for SERVING -- deliberately NOT set here: repetition
