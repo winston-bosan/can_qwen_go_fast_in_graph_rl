@@ -164,8 +164,19 @@
     <h1>Graph-RL retrieval, side by side with Exa</h1>
     <p>Ask a question. Left: our agent harness reasoning over a Wikidata5M knowledge graph. Right: Exa web search.</p>
     <form class="searchbar" id="form">
-      <input id="q" autocomplete="off"
+      <input id="q" autocomplete="off" list="presets"
+        placeholder="Ask a question — or press \u2193 for examples"
         value="Which films were directed by someone who attended Harvard University?" />
+      <datalist id="presets">
+        <option value="Which movies star both Robert De Niro and Al Pacino?"></option>
+        <option value="Which films did Christopher Nolan direct?"></option>
+        <option value="Which famous physicists studied at ETH Zurich?"></option>
+        <option value="Who founded SpaceX?"></option>
+        <option value="What companies does Berkshire Hathaway own?"></option>
+        <option value="Which bands has Dave Grohl been a member of?"></option>
+        <option value="Which actors appeared in both The Departed and Titanic?"></option>
+        <option value="Which films were directed by someone who attended Harvard University?"></option>
+      </datalist>
       <select id="modelSel" style="padding:0.5rem;border-radius:8px;"><option value="local:rl60">Qwen-1.7B</option><option value="minimax/minimax-m3">MiniMax-M3</option></select><button type="submit" id="go">Ask</button>
     </form>
   </header>
