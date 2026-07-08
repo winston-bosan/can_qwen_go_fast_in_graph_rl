@@ -94,6 +94,10 @@ class FindPathsIn(BaseModel):
     limit: int = Field(default=10, ge=1, le=20)
 
 
+class RunCypherIn(BaseModel):
+    query: str = Field(min_length=1, max_length=4000)
+
+
 # ---------------------------------------------------------------- endpoints
 @app.get("/health")
 def health() -> dict:
@@ -244,6 +248,55 @@ def find_paths(body: FindPathsIn) -> dict:
             ]
             paths.append({"length": len(edges), "nodes": nodes, "edges": edges})
     return {"paths": paths}
+
+
+# Write clauses / procedures we refuse outright (read-only tool). Word-boundary
+# keyword scan, case-insensitive -- deliberately no Cypher parser.
+_CYPHER_FORBIDDEN = re.compile(
+    r"\b(CREATE|MERGE|DELETE|DETACH|SET|REMOVE|DROP|FOREACH|LOAD\s+CSV"
+    r"|apoc\.(?!meta|text|coll)|db\.index)\b",
+    re.IGNORECASE,
+)
+_CYPHER_LIMIT_RE = re.compile(r"\bLIMIT\s+(\d+)\b", re.IGNORECASE)
+_CYPHER_MAX_ROWS = 100
+_CYPHER_TIMEOUT_S = 2.0  # latency budget is ~1s/tool-call; hard-stop runaways at 2s
+
+
+@app.post("/run_cypher")
+def run_cypher(body: RunCypherIn) -> dict:
+    """Read-only Cypher over the Wikidata5M graph. Errors return as strings
+    (the calling model must see them), never as HTTP failures."""
+    q = body.query.strip().rstrip(";")
+    if _CYPHER_FORBIDDEN.search(q):
+        return {"rows": [], "error": "rejected: write clauses/procedures are not allowed (read-only tool)"}
+    m = _CYPHER_LIMIT_RE.search(q)
+    if m is None:
+        q += f" LIMIT {_CYPHER_MAX_ROWS}"
+    elif int(m.group(1)) > _CYPHER_MAX_ROWS:
+        q = _CYPHER_LIMIT_RE.sub(f"LIMIT {_CYPHER_MAX_ROWS}", q, count=1)
+    from neo4j import Query
+
+    try:
+        with res.driver.session() as s:
+            result = s.run(Query(q, timeout=_CYPHER_TIMEOUT_S))
+            keys = result.keys()
+            rows = []
+            for rec in result:
+                row = {}
+                for k in keys:
+                    v = rec[k]
+                    if hasattr(v, "get") and hasattr(v, "labels"):  # Node
+                        row[k] = {"qid": v.get("qid"), "title": v.get("title")}
+                    elif hasattr(v, "type") and hasattr(v, "start_node"):  # Relationship
+                        row[k] = {"rel": v.type, "label": v.get("label")}
+                    elif hasattr(v, "nodes"):  # Path
+                        row[k] = {"path_qids": [n.get("qid") for n in v.nodes]}
+                    else:
+                        row[k] = v
+                rows.append(row)
+        return {"rows": rows, "n": len(rows)}
+    except Exception as e:  # timeout, syntax error, ... -> model-visible string
+        return {"rows": [], "error": f"{type(e).__name__}: {str(e)[:400]}"}
 
 
 if __name__ == "__main__":
