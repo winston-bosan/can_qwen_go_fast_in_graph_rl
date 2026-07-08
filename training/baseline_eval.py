@@ -508,6 +508,8 @@ async def run(args: argparse.Namespace) -> int:
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--model", default="Qwen/Qwen3-4B")
+    p.add_argument("--arm", choices=["ours", "cypher"], default="ours",
+                   help="tool surface: ours=4 primitives, cypher=vector_search+run_cypher")
     p.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"])
     p.add_argument("--questions", default=None, help="questions JSONL (default: built-in sample)")
     p.add_argument("--mock-tools", action="store_true", help="canned tool responses; no data/server needed")
