@@ -1,0 +1,97 @@
+# Fallback validation run: Qwen3-1.7B GRPO -- PREPARED, NOT LAUNCHED (user go
+# required). Zero-compat-risk sibling of the smoke-qualified Qwen3-0.6B setup:
+# same hermes tool-call format, same qualified stack (default .venv-train:
+# verl 0.8.0 + sglang 0.5.8 + tfm 4.57.1), same agent loop. Created after the
+# Qwen3.5-2B attempt died on cudaErrorIllegalAddress in the qwen3_5 GDN
+# compute path under FSDP (verl#6549; naive AND fused kernels both crash --
+# see README "Qwen3.5 option" and configs/validate_2b_qwen35.yaml).
+#
+# Launch (after user go; note: NO ECS_TRAIN_VENV override -- qualified venv):
+#   CONFIG_NAME=validate_1p7b LENGTH_SCHEDULE="2048:30 4096:60" \
+#   WANDB_MODE=offline ECS_REWARD_CONFIG=/root/training/configs/reward.yaml \
+#   training/launch/run_validate.sh
+
+hydra:
+  searchpath:
+    - pkg://verl.trainer.config
+
+defaults:
+  - ppo_trainer
+  - _self_
+
+data:
+  train_files: data/rl/train.parquet
+  val_files: data/rl/val.parquet
+  train_batch_size: 32
+  max_prompt_length: 2048
+  max_response_length: 6144
+  return_raw_chat: true
+  shuffle: true
+  filter_overlong_prompts: true
+  truncation: error
+
+algorithm:
+  adv_estimator: grpo
+  use_kl_in_reward: false
+  norm_adv_by_std_in_grpo: true
+
+actor_rollout_ref:
+  hybrid_engine: true
+  model:
+    path: Qwen/Qwen3-4B
+    use_remove_padding: true
+    enable_gradient_checkpointing: true
+  actor:
+    optim:
+      lr: 1.0e-6
+    ppo_mini_batch_size: 32
+    ppo_micro_batch_size_per_gpu: 4     # 4B @ 8k ctx, H200-143GB has ample headroom
+    use_kl_loss: false
+    kl_loss_coef: 0.001
+    kl_loss_type: low_var_kl
+    entropy_coeff: 0
+    loss_agg_mode: token-mean
+    fsdp_config:
+      param_offload: false
+      optimizer_offload: false
+  rollout:
+    name: sglang
+    agent:
+      default_agent_loop: tool_agent    # REQUIRED: default single_turn_agent never calls tools
+    n: 8
+    temperature: 1.0
+    top_p: 1.0
+    prompt_length: ${data.max_prompt_length}
+    response_length: ${data.max_response_length}
+    gpu_memory_utilization: 0.45        # 1.7B trainer state ~27GB; engine 0.45*80=36GB
+    tensor_model_parallel_size: 1
+    log_prob_micro_batch_size_per_gpu: 4
+    multi_turn:
+      enable: true
+      max_assistant_turns: 9
+      max_user_turns: 8
+      format: hermes                    # Qwen3 family native <tool_call> JSON
+      tool_config_path: training/configs/tools_ecs.yaml
+      tokenization_sanity_check_mode: strict
+  ref:
+    log_prob_micro_batch_size_per_gpu: 4
+    fsdp_config:
+      param_offload: true
+
+custom_reward_function:
+  path: training/env/reward.py
+  name: compute_score
+
+trainer:
+  project_name: ecs-grpo
+  experiment_name: limited-4b-2xh200
+  logger: ["console", "wandb"]
+  n_gpus_per_node: 2                    # 2x H200-143GB
+  nnodes: 1
+  save_freq: 30
+  max_actor_ckpt_to_keep: 1           # 102GB disk: one 4B ckpt (~50GB) fits once
+  test_freq: 10
+  total_epochs: 5
+  val_before_train: false
+  default_local_dir: checkpoints/${trainer.project_name}/${trainer.experiment_name}
+  resume_mode: auto
